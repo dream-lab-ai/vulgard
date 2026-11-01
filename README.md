@@ -61,7 +61,9 @@ the demo never goes stale.
 2. **Create a GitHub App** owned by the org and install it on all repositories, with these
    permissions:
    - Repository: Dependabot alerts (read), Issues (read/write), Contents (read/write),
-     Pull requests (read/write), Administration (read/write), Workflows (read/write)
+     Pull requests (read/write), Administration (read/write), Workflows (read/write),
+     Checks (read), Commit statuses (read). The last two let vulgard see whether a
+     Dependabot PR's CI passed.
    - Organization: Administration (read/write), needed only for `enforce`
 
    Save its ID as the Actions variable `VULGARD_APP_ID` and its private key as the secret
