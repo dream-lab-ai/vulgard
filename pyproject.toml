@@ -1,5 +1,5 @@
 [project]
-name = "vulnguard"
+name = "vulgard"
 version = "0.1.0"
 description = "Org-wide enforcement for dependency vulnerabilities: SLA nagging, Dependabot auto-merge, and PR blocking."
 readme = "README.md"
@@ -13,7 +13,7 @@ dependencies = [
 ]
 
 [project.scripts]
-vulnguard = "vulnguard.cli:main"
+vulgard = "vulgard.cli:main"
 
 [build-system]
 requires = ["uv_build>=0.13.6,<0.14.0"]

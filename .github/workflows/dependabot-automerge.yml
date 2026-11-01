@@ -37,7 +37,7 @@ jobs:
           MERGE_METHOD: ${{ inputs.merge-method }}
         run: |
           echo "Auto-merging $UPDATE_TYPE update"
-          gh pr review --approve "$PR_URL" --body "Auto-approved by vulnguard: $UPDATE_TYPE update." || \
+          gh pr review --approve "$PR_URL" --body "Auto-approved by vulgard: $UPDATE_TYPE update." || \
             echo "::warning::Could not approve. Enable 'Allow GitHub Actions to create and approve pull requests' in org settings if reviews are required."
           gh pr merge --auto "--$MERGE_METHOD" "$PR_URL"
 

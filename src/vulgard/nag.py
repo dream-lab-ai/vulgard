@@ -11,7 +11,7 @@ import httpx
 from .config import SEVERITIES, Config
 from .policy import Alert, RepoReport, SlaStatus, now_utc, parse_time
 
-STATE_RE = re.compile(r"<!-- vulnguard-state (\{.*?\}) -->", re.S)
+STATE_RE = re.compile(r"<!-- vulgard-state (\{.*?\}) -->", re.S)
 SEVERITY_ICON = {"critical": "🟥", "high": "🟧", "medium": "🟨", "low": "⬜"}
 
 
@@ -85,9 +85,9 @@ def render_issue_body(
     lines += [
         "",
         "---",
-        f"_Updated by vulnguard on {now:%Y-%m-%d %H:%M} UTC. This issue closes itself once "
+        f"_Updated by vulgard on {now:%Y-%m-%d %H:%M} UTC. This issue closes itself once "
         "every alert is resolved. Please don't edit it by hand; changes are overwritten._",
-        f"<!-- vulnguard-state {json.dumps(state, sort_keys=True)} -->",
+        f"<!-- vulgard-state {json.dumps(state, sort_keys=True)} -->",
     ]
     return "\n".join(lines)
 

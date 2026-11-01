@@ -1,4 +1,4 @@
-# Used by `vulnguard enforce --mode workflow`: an org ruleset runs this workflow on
+# Used by `vulgard enforce --mode workflow`: an org ruleset runs this workflow on
 # every PR in every repo, with no per-repo files needed. Requires org rulesets with
 # required workflows (GitHub Enterprise Cloud) and the dependency graph on target repos.
 name: dependency-review

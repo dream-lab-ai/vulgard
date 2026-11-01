@@ -17,7 +17,7 @@ class GitHubError(RuntimeError):
 
 
 class GitHub:
-    """Thin GitHub REST client covering only the endpoints vulnguard needs."""
+    """Thin GitHub REST client covering only the endpoints vulgard needs."""
 
     def __init__(self, token: str | None = None, base_url: str | None = None):
         token = token or os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
@@ -29,7 +29,7 @@ class GitHub:
                 "Authorization": f"Bearer {token}",
                 "Accept": "application/vnd.github+json",
                 "X-GitHub-Api-Version": "2022-11-28",
-                "User-Agent": "vulnguard",
+                "User-Agent": "vulgard",
             },
             timeout=30.0,
         )
@@ -146,7 +146,7 @@ class GitHub:
             self._json(
                 "POST",
                 f"/repos/{org}/{repo}/labels",
-                json={"name": label, "color": "b60205", "description": "Tracked by vulnguard"},
+                json={"name": label, "color": "b60205", "description": "Tracked by vulgard"},
             )
         except GitHubError as e:
             if e.status != 422:

@@ -10,5 +10,5 @@ escalation:
   severities: [critical, high]
   mentions: ["@acme/security"]
 rollout:
-  workflow_repo: vulnguard
+  workflow_repo: vulgard
   engine: osv

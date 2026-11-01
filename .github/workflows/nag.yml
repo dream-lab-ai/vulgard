@@ -1,6 +1,6 @@
 # Scheduled job that updates per-repo tracking issues, pings owners, escalates overdue
 # alerts, and posts a Slack digest. Needs a GitHub App installed on the org (see README).
-name: vulnguard-nag
+name: vulgard-nag
 
 on:
   schedule:
@@ -16,7 +16,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: vulnguard-nag
+  group: vulgard-nag
   cancel-in-progress: false
 
 jobs:
@@ -28,13 +28,13 @@ jobs:
       - id: app-token
         uses: actions/create-github-app-token@v2
         with:
-          app-id: ${{ vars.VULNGUARD_APP_ID }}
-          private-key: ${{ secrets.VULNGUARD_APP_PRIVATE_KEY }}
+          app-id: ${{ vars.VULGARD_APP_ID }}
+          private-key: ${{ secrets.VULGARD_APP_PRIVATE_KEY }}
           owner: ${{ github.repository_owner }}
 
       - uses: astral-sh/setup-uv@v6
 
-      - name: Run vulnguard
+      - name: Run vulgard
         env:
           GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
@@ -42,4 +42,4 @@ jobs:
         run: |
           args=(--org "${{ github.repository_owner }}" nag --slack)
           if [ "$APPLY" = "true" ]; then args+=(--apply); fi
-          uv run vulnguard "${args[@]}"
+          uv run vulgard "${args[@]}"

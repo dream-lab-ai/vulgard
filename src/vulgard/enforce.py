@@ -6,7 +6,7 @@ from typing import Any
 from .config import Config
 from .rollout import WORKFLOW_PATH
 
-RULESET_NAME = "vulnguard: block vulnerable dependencies"
+RULESET_NAME = "vulgard: block vulnerable dependencies"
 STATUS_CHECK_CONTEXT = "dependency-review / review"
 REQUIRED_WORKFLOW_PATH = ".github/workflows/required-dependency-review.yml"
 
@@ -28,7 +28,7 @@ def build_ruleset(
         if not enrolled:
             raise ValueError(
                 f"No repos contain {WORKFLOW_PATH} on their default branch yet. "
-                "Run `vulnguard rollout --apply` and merge those PRs first."
+                "Run `vulgard rollout --apply` and merge those PRs first."
             )
         repo_condition = {"include": enrolled, "exclude": [], "protected": False}
         rule = {
@@ -41,7 +41,7 @@ def build_ruleset(
         }
     elif mode == "workflow":
         if workflow_repo_id is None:
-            raise ValueError("workflow mode needs the id of the vulnguard repository")
+            raise ValueError("workflow mode needs the id of the vulgard repository")
         repo_condition = {
             "include": ["~ALL"] if config.include == ["*"] else config.include,
             "exclude": config.exclude + [config.rollout.workflow_repo],

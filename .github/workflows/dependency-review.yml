@@ -1,6 +1,6 @@
 # Reusable PR gate. Fails when a PR adds or upgrades to a dependency with a known
 # vulnerability at or above `fail-on-severity`. Repos call it through the caller
-# workflow that `vulnguard rollout` installs; the status check is
+# workflow that `vulgard rollout` installs; the status check is
 # "dependency-review / review".
 name: dependency-review
 

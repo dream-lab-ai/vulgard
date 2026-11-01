@@ -1,4 +1,4 @@
-# vulnguard configuration. `org` defaults to the owner of this repo when run from
+# vulgard configuration. `org` defaults to the owner of this repo when run from
 # the scheduled workflow (passed via --org), so it is left unset here.
 
 repos:
@@ -27,14 +27,14 @@ escalation:
   mentions: []            # e.g. ["@your-org/security", "@cto-handle"]
 
 issue:
-  label: vulnguard
+  label: vulgard
   title: "Security debt: vulnerable dependencies need attention"
 
 slack:
   webhook_env: SLACK_WEBHOOK_URL
 
 rollout:
-  workflow_repo: vulnguard        # the repo hosting these reusable workflows
+  workflow_repo: vulgard        # the repo hosting these reusable workflows
   workflow_ref: main
   fail_on_severity: high          # low | medium | high | critical
   engine: github                  # github (needs GHAS on private repos) | osv
@@ -43,4 +43,4 @@ rollout:
     - version-update:semver-patch
     - version-update:semver-minor
   schedule_interval: weekly
-  branch: vulnguard/rollout
+  branch: vulgard/rollout

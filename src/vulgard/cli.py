@@ -182,11 +182,11 @@ def cmd_enforce(gh: Any, config: Config, args: argparse.Namespace) -> int:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="vulnguard",
+        prog="vulgard",
         description="Make your org actually fix vulnerable dependencies.",
     )
     parser.add_argument(
-        "--config", default="vulnguard.yml", help="config file (default: %(default)s)"
+        "--config", default="vulgard.yml", help="config file (default: %(default)s)"
     )
     parser.add_argument("--org", help="GitHub org (overrides config)")
     parser.add_argument(
@@ -211,7 +211,7 @@ def build_parser() -> argparse.ArgumentParser:
     add_repo_filter(p)
     p.set_defaults(func=cmd_nag)
 
-    p = sub.add_parser("rollout", help="open PRs adding dependabot.yml and the vulnguard workflow")
+    p = sub.add_parser("rollout", help="open PRs adding dependabot.yml and the vulgard workflow")
     p.add_argument("--apply", action="store_true", help="open PRs (default is dry-run)")
     p.add_argument("--show", action="store_true", help="print the generated files in dry-run")
     add_repo_filter(p)

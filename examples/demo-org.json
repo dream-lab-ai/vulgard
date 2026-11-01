@@ -6,7 +6,7 @@
     {"id": 104, "name": "data-pipeline", "default_branch": "master", "archived": false},
     {"id": 105, "name": "sandbox-experiments", "default_branch": "main", "archived": false},
     {"id": 106, "name": "legacy-billing", "default_branch": "main", "archived": true},
-    {"id": 107, "name": "vulnguard", "default_branch": "main", "archived": false}
+    {"id": 107, "name": "vulgard", "default_branch": "main", "archived": false}
   ],
   "alerts": [
     {
@@ -100,7 +100,7 @@
     "inventory-service": {
       "number": 5,
       "title": "Security debt: vulnerable dependencies need attention",
-      "body": "old report\n<!-- vulnguard-state {\"overdue\": [2], \"escalated\": [], \"last_reminder\": \"2026-01-01T00:00:00+00:00\"} -->",
+      "body": "old report\n<!-- vulgard-state {\"overdue\": [2], \"escalated\": [], \"last_reminder\": \"2026-01-01T00:00:00+00:00\"} -->",
       "state": "open"
     }
   },
@@ -110,7 +110,7 @@
       ".github/dependabot.yml": "version: 2\nupdates: []\n"
     },
     "inventory-service": {
-      ".github/workflows/vulnguard.yml": "name: vulnguard\n",
+      ".github/workflows/vulgard.yml": "name: vulgard\n",
       ".github/dependabot.yml": "version: 2\nupdates: []\n"
     }
   },

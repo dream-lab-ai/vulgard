@@ -21,13 +21,13 @@ class EscalationConfig:
 
 @dataclass
 class IssueConfig:
-    label: str = "vulnguard"
+    label: str = "vulgard"
     title: str = "Security debt: vulnerable dependencies need attention"
 
 
 @dataclass
 class RolloutConfig:
-    workflow_repo: str = "vulnguard"
+    workflow_repo: str = "vulgard"
     workflow_ref: str = "main"
     fail_on_severity: str = "high"
     engine: str = "github"
@@ -36,7 +36,7 @@ class RolloutConfig:
         default_factory=lambda: ["version-update:semver-patch", "version-update:semver-minor"]
     )
     schedule_interval: str = "weekly"
-    branch: str = "vulnguard/rollout"
+    branch: str = "vulgard/rollout"
 
 
 @dataclass
@@ -105,6 +105,6 @@ def load_config(path: str | Path | None, org_override: str | None = None) -> Con
         p = Path(path)
         if p.exists():
             raw = yaml.safe_load(p.read_text()) or {}
-        elif str(path) != "vulnguard.yml":
+        elif str(path) != "vulgard.yml":
             raise FileNotFoundError(f"Config file not found: {path}")
     return parse_config(raw, org_override)

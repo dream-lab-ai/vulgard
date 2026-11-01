@@ -9,7 +9,7 @@ import yaml
 from .config import Config
 
 DEPENDABOT_PATH = ".github/dependabot.yml"
-WORKFLOW_PATH = ".github/workflows/vulnguard.yml"
+WORKFLOW_PATH = ".github/workflows/vulgard.yml"
 
 MANIFESTS: dict[str, str] = {
     "package.json": "npm",
@@ -72,7 +72,7 @@ def render_dependabot_config(ecosystems: dict[str, list[str]], interval: str) ->
         }
         updates.append(entry)
     header = (
-        "# Managed by vulnguard. Minor and patch updates are grouped into one PR per\n"
+        "# Managed by vulgard. Minor and patch updates are grouped into one PR per\n"
         "# ecosystem, and those PRs merge automatically once CI passes.\n"
     )
     return header + yaml.safe_dump({"version": 2, "updates": updates}, sort_keys=False)
@@ -93,9 +93,9 @@ def render_caller_workflow(config: Config) -> str:
     with:
       update-types: {",".join(r.auto_merge_update_types)}
 """
-    return f"""# Managed by vulnguard ({source}). Blocks PRs that add vulnerable dependencies
+    return f"""# Managed by vulgard ({source}). Blocks PRs that add vulnerable dependencies
 # and auto-merges low-risk Dependabot updates once required checks pass.
-name: vulnguard
+name: vulgard
 
 on:
   pull_request:
@@ -119,7 +119,7 @@ jobs:
 
 
 PR_BODY = """\
-This PR was opened by vulnguard, the org-wide dependency security automation.
+This PR was opened by vulgard, the org-wide dependency security automation.
 
 It adds:
 {items}
@@ -183,7 +183,7 @@ def apply_rollout(gh: Any, config: Config, plan: RolloutPlan) -> str | None:
     pr = gh.create_pr(
         org,
         plan.repo,
-        "chore(security): enable vulnguard dependency checks",
+        "chore(security): enable vulgard dependency checks",
         PR_BODY.format(items=items, severity=config.rollout.fail_on_severity),
         branch,
         plan.default_branch,

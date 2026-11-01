@@ -7,13 +7,13 @@ from pathlib import Path
 import pytest
 import yaml
 
-from vulnguard.cli import collect, main
-from vulnguard.config import parse_config
-from vulnguard.enforce import STATUS_CHECK_CONTEXT, plan_enforce
-from vulnguard.fixtures import FixtureGitHub
-from vulnguard.nag import nag, plan_repo, read_state
-from vulnguard.policy import SlaStatus, evaluate, parse_codeowners_default
-from vulnguard.rollout import (
+from vulgard.cli import collect, main
+from vulgard.config import parse_config
+from vulgard.enforce import STATUS_CHECK_CONTEXT, plan_enforce
+from vulgard.fixtures import FixtureGitHub
+from vulgard.nag import nag, plan_repo, read_state
+from vulgard.policy import SlaStatus, evaluate, parse_codeowners_default
+from vulgard.rollout import (
     DEPENDABOT_PATH,
     WORKFLOW_PATH,
     detect_ecosystems,
@@ -158,7 +158,7 @@ def test_clean_repo_closes_issue(config):
 
 
 def test_nag_apply_against_fixture():
-    config = parse_config(yaml.safe_load((EXAMPLES / "vulnguard.yml").read_text()))
+    config = parse_config(yaml.safe_load((EXAMPLES / "vulgard.yml").read_text()))
     gh = FixtureGitHub.from_file(EXAMPLES / "demo-org.json")
     reports = collect(gh, config)
     assert "sandbox-experiments" not in reports  # excluded
@@ -208,14 +208,14 @@ def test_dependabot_config_groups_updates():
 def test_caller_workflow_is_valid_yaml(config):
     wf = yaml.safe_load(render_caller_workflow(config))
     jobs = wf["jobs"]
-    assert jobs["dependency-review"]["uses"].startswith("acme/vulnguard/")
+    assert jobs["dependency-review"]["uses"].startswith("acme/vulgard/")
     assert "dependabot-automerge" in jobs
     config.rollout.auto_merge = False
     assert "dependabot-automerge" not in yaml.safe_load(render_caller_workflow(config))["jobs"]
 
 
 def test_rollout_plan_only_adds_missing_files():
-    config = parse_config(yaml.safe_load((EXAMPLES / "vulnguard.yml").read_text()))
+    config = parse_config(yaml.safe_load((EXAMPLES / "vulgard.yml").read_text()))
     gh = FixtureGitHub.from_file(EXAMPLES / "demo-org.json")
     repos = {r["name"]: r for r in gh.list_repos("acme")}
     assert set(plan_rollout(gh, config, repos["payments-api"]).files) == {
@@ -227,7 +227,7 @@ def test_rollout_plan_only_adds_missing_files():
 
 
 def test_enforce_status_check_targets_enrolled_repos_only():
-    config = parse_config(yaml.safe_load((EXAMPLES / "vulnguard.yml").read_text()))
+    config = parse_config(yaml.safe_load((EXAMPLES / "vulgard.yml").read_text()))
     gh = FixtureGitHub.from_file(EXAMPLES / "demo-org.json")
     p = plan_enforce(gh, config, "status-check", gh.list_repos("acme"))
     assert p.enrolled == ["inventory-service"]
@@ -237,19 +237,19 @@ def test_enforce_status_check_targets_enrolled_repos_only():
 
 
 def test_enforce_workflow_mode_uses_repo_id():
-    config = parse_config(yaml.safe_load((EXAMPLES / "vulnguard.yml").read_text()))
+    config = parse_config(yaml.safe_load((EXAMPLES / "vulgard.yml").read_text()))
     gh = FixtureGitHub.from_file(EXAMPLES / "demo-org.json")
     p = plan_enforce(gh, config, "workflow", gh.list_repos("acme"))
     wf = p.ruleset["rules"][0]["parameters"]["workflows"][0]
     assert wf["repository_id"] == 107
-    assert "vulnguard" in p.ruleset["conditions"]["repository_name"]["exclude"]
+    assert "vulgard" in p.ruleset["conditions"]["repository_name"]["exclude"]
 
 
 def test_cli_report_json(capsys):
     code = main(
         [
             "--config",
-            str(EXAMPLES / "vulnguard.yml"),
+            str(EXAMPLES / "vulgard.yml"),
             "--fixtures",
             str(EXAMPLES / "demo-org.json"),
             "report",
