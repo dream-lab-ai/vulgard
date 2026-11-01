@@ -97,8 +97,15 @@ the demo never goes stale.
      the weekly leaderboard, plus updates for repos that `slack.channels` doesn't map.
    - `slack.channels` maps a repo name, a repo glob, or an owner handle (from config or
      `CODEOWNERS`) to a team channel. Matching order: exact repo, repo glob, then owner.
-   - `linear.teams` maps a repo name or owner handle to a Linear team key. Repos with no
-     match go to `linear.default_team`.
+   - `linear.teams` maps a repo name, repo glob, or owner handle to a Linear team key. Repos
+     with no match go to `linear.default_team`. `linear.labels`, `linear.project`, and
+     `linear.state` (for example `Triage`) set what new issues get. Map an entry to
+     `{team, labels, project, state, severity_labels}` instead of a bare key to override them
+     for that repo or team. Labels and project apply when vulgard creates the issue; the state
+     is also used when it reopens one. `severity_labels` maps the worst open severity to a
+     label (for example `{critical: Critical, high: High}`), and vulgard swaps it as that
+     changes. A label name matches the team's own label first, then a workspace
+     label, and vulgard creates a workspace label if neither exists.
    - `slack.users` maps GitHub handles to Slack user IDs, used for mentions and DMs, or to
      user group IDs (`S…`) for team mentions.
    - `linear.users` maps GitHub handles to Linear emails, used to assign issues.
