@@ -3,11 +3,28 @@ from __future__ import annotations
 import base64
 import os
 import time
+from collections.abc import Callable
+from datetime import datetime
 from typing import Any
 
 import httpx
 
 API_URL = "https://api.github.com"
+
+DEPENDABOT_PRS_QUERY = """
+query($q: String!, $after: String) {
+  search(query: $q, type: ISSUE, first: 100, after: $after) {
+    pageInfo { hasNextPage endCursor }
+    nodes {
+      ... on PullRequest {
+        number title url createdAt isDraft mergeable
+        repository { name }
+        commits(last: 1) { nodes { commit { statusCheckRollup { state } } } }
+      }
+    }
+  }
+}
+"""
 
 
 class GitHubError(RuntimeError):
@@ -61,14 +78,23 @@ class GitHub:
         resp = self._request(method, url, **kwargs)
         return resp.json() if resp.content else None
 
-    def _paginate(self, url: str, params: dict[str, Any] | None = None) -> list[Any]:
+    def _paginate(
+        self,
+        url: str,
+        params: dict[str, Any] | None = None,
+        until: Callable[[Any], bool] | None = None,
+    ) -> list[Any]:
+        """Fetch every page; with `until`, stop at the first item it matches (exclusive)."""
         items: list[Any] = []
         next_url: str | None = url
         next_params = {"per_page": 100, **(params or {})}
         while next_url:
             resp = self._request("GET", next_url, params=next_params)
             data = resp.json()
-            items.extend(data["items"] if isinstance(data, dict) and "items" in data else data)
+            for item in data["items"] if isinstance(data, dict) and "items" in data else data:
+                if until and until(item):
+                    return items
+                items.append(item)
             next_url = resp.links.get("next", {}).get("url")
             next_params = None
         return items
@@ -84,9 +110,46 @@ class GitHub:
     def list_open_alerts(self, org: str) -> list[dict[str, Any]]:
         return self._paginate(f"/orgs/{org}/dependabot/alerts", {"state": "open"})
 
+    def list_closed_alerts(self, org: str, since: datetime) -> list[dict[str, Any]]:
+        return self._paginate(
+            f"/orgs/{org}/dependabot/alerts",
+            {"state": "fixed,dismissed", "sort": "updated", "direction": "desc"},
+            until=lambda a: datetime.fromisoformat(a["updated_at"].replace("Z", "+00:00")) < since,
+        )
+
     def list_dependabot_prs(self, org: str) -> list[dict[str, Any]]:
-        query = f"org:{org} is:pr is:open author:app/dependabot archived:false"
-        return self._paginate("/search/issues", {"q": query})
+        search = f"org:{org} is:pr is:open author:app/dependabot archived:false"
+        prs: list[dict[str, Any]] = []
+        after: str | None = None
+        while True:
+            variables = {"q": search, "after": after}
+            data = self._json(
+                "POST", "/graphql", json={"query": DEPENDABOT_PRS_QUERY, "variables": variables}
+            )
+            if data.get("errors"):
+                messages = "; ".join(e.get("message", "") for e in data["errors"])
+                raise GitHubError(200, messages, "/graphql")
+            result = data["data"]["search"]
+            for node in result["nodes"]:
+                if not node:
+                    continue
+                commits = node["commits"]["nodes"]
+                rollup = commits[0]["commit"]["statusCheckRollup"] if commits else None
+                prs.append(
+                    {
+                        "number": node["number"],
+                        "title": node["title"],
+                        "html_url": node["url"],
+                        "repository_url": f"{API_URL}/repos/{org}/{node['repository']['name']}",
+                        "created_at": node["createdAt"],
+                        "draft": node["isDraft"],
+                        "mergeable": node["mergeable"],
+                        "ci_state": rollup["state"] if rollup else None,
+                    }
+                )
+            if not result["pageInfo"]["hasNextPage"]:
+                return prs
+            after = result["pageInfo"]["endCursor"]
 
     def get_file(self, org: str, repo: str, path: str) -> str | None:
         try:
@@ -153,13 +216,25 @@ class GitHub:
                 raise
 
     def create_issue(
-        self, org: str, repo: str, title: str, body: str, labels: list[str]
+        self,
+        org: str,
+        repo: str,
+        title: str,
+        body: str,
+        labels: list[str],
+        assignees: list[str] | None = None,
     ) -> dict[str, Any]:
-        return self._json(
-            "POST",
-            f"/repos/{org}/{repo}/issues",
-            json={"title": title, "body": body, "labels": labels},
-        )
+        payload: dict[str, Any] = {"title": title, "body": body, "labels": labels}
+        if assignees:
+            try:
+                return self._json(
+                    "POST", f"/repos/{org}/{repo}/issues", json={**payload, "assignees": assignees}
+                )
+            except GitHubError as e:
+                # An owner without repo access can't be assigned; still open the issue.
+                if e.status != 422:
+                    raise
+        return self._json("POST", f"/repos/{org}/{repo}/issues", json=payload)
 
     def update_issue(self, org: str, repo: str, number: int, **fields: Any) -> dict[str, Any]:
         return self._json("PATCH", f"/repos/{org}/{repo}/issues/{number}", json=fields)

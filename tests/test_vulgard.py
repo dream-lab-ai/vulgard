@@ -10,9 +10,11 @@ import yaml
 from vulgard.cli import collect, main
 from vulgard.config import parse_config
 from vulgard.enforce import STATUS_CHECK_CONTEXT, plan_enforce
-from vulgard.fixtures import FixtureGitHub
-from vulgard.nag import nag, plan_repo, read_state
-from vulgard.policy import SlaStatus, evaluate, parse_codeowners_default
+from vulgard.fixtures import FakeLinear, FakeSlack, FixtureGitHub, fixture_clients
+from vulgard.nag import nag, plan_repo
+from vulgard.plan import IssueOp, LinearRef, TrackingState
+from vulgard.policy import SlaStatus, evaluate, parse_codeowners_default, summarize_closed
+from vulgard.render import render_issue_body
 from vulgard.rollout import (
     DEPENDABOT_PATH,
     WORKFLOW_PATH,
@@ -21,6 +23,7 @@ from vulgard.rollout import (
     render_caller_workflow,
     render_dependabot_config,
 )
+from vulgard.slack import digest_message, notify_slack
 
 EXAMPLES = Path(__file__).parent.parent / "examples"
 NOW = datetime(2026, 11, 1, 12, tzinfo=UTC)
@@ -45,13 +48,15 @@ def alert(number: int, repo: str, severity: str, days_ago: int, package: str = "
     }
 
 
-def pr(number: int, repo: str, title: str, days_ago: int) -> dict:
+def pr(number: int, repo: str, title: str, days_ago: int, ci: str | None = None) -> dict:
     return {
         "number": number,
         "title": title,
         "html_url": f"https://github.com/acme/{repo}/pull/{number}",
         "repository_url": f"https://api.github.com/repos/acme/{repo}",
         "created_at": iso(days_ago),
+        "ci_state": ci,
+        "mergeable": "MERGEABLE",
     }
 
 
@@ -104,78 +109,273 @@ def test_unknown_config_keys_rejected():
         parse_config({"org": "acme", "escalation": {"menshuns": []}})
 
 
-def plan(config, alerts, issue=None, prs=(), now=NOW):
-    report = evaluate(config, alerts, list(prs), ["api"], now)["api"]
+def plan(config, alerts, issue=None, prs=(), now=NOW, kev=frozenset()):
+    report = evaluate(config, alerts, list(prs), ["api"], now, kev=kev)["api"]
     report.owners = ["@acme/api"]
     return plan_repo(report, config, issue, now)
 
 
+def body(p, config, now=NOW):
+    return render_issue_body(p.report, config, p.state, now)
+
+
+def issue_after(p, config, now=NOW):
+    return {"number": 5, "body": body(p, config, now)}
+
+
 def test_first_run_creates_issue_and_escalates_old_critical(config):
-    actions, body, comments = plan(config, [alert(1, "api", "critical", 20)])
-    assert [a.kind for a in actions] == ["create", "escalate"]
-    assert "@acme/api" in body
-    assert len(comments) == 1 and "@acme/security" in comments[0]
-    state = read_state(body)
-    assert state["overdue"] == [1] and state["escalated"] == [1]
+    p = plan(config, [alert(1, "api", "critical", 20)])
+    assert [a.kind for a in p.actions()] == ["create", "escalate"]
+    assert "@acme/api" in body(p, config)
+    assert len(p.comments) == 1 and "@acme/security" in p.comments[0]
+    state = TrackingState.from_body(body(p, config))
+    assert state.overdue == (1,) and state.escalated == (1,)
+
+
+def test_tracking_state_round_trips_through_issue_body(config):
+    p = plan(config, [alert(1, "api", "critical", 20)])
+    assert TrackingState.from_body(body(p, config)) == p.state
+    assert TrackingState.from_body("no state here") == TrackingState()
 
 
 def test_no_repeat_pings_until_reminder_interval(config):
     alerts = [alert(1, "api", "critical", 20)]
-    _, body, _ = plan(config, alerts)
-    issue = {"number": 5, "body": body}
+    first = plan(config, alerts)
 
     # Next day: nothing new, so no comment and no re-escalation.
-    actions, body2, comments = plan(config, alerts, issue, now=NOW + timedelta(days=1))
-    assert comments == []
-    assert "comment" not in {a.kind for a in actions}
+    p = plan(config, alerts, issue_after(first, config), now=NOW + timedelta(days=1))
+    assert p.comments == [] and not p.pinged
+    assert "comment" not in {a.kind for a in p.actions()}
 
     # A week later: periodic reminder.
-    issue = {"number": 5, "body": body2}
-    actions, _, comments = plan(config, alerts, issue, now=NOW + timedelta(days=7))
-    assert len(comments) == 1 and "Reminder" in comments[0]
+    p = plan(config, alerts, issue_after(p, config), now=NOW + timedelta(days=7))
+    assert len(p.comments) == 1 and "Reminder" in p.comments[0]
+    assert p.reminder
 
 
 def test_newly_overdue_alert_triggers_comment(config):
-    _, body, _ = plan(config, [alert(1, "api", "high", 25)])
-    issue = {"number": 5, "body": body}
-    actions, _, comments = plan(
-        config, [alert(1, "api", "high", 25)], issue, now=NOW + timedelta(days=6)
-    )
-    assert "comment" in {a.kind for a in actions}
-    assert "just went past their fix deadline" in comments[0]
+    first = plan(config, [alert(1, "api", "high", 25)])
+    later = NOW + timedelta(days=6)
+    p = plan(config, [alert(1, "api", "high", 25)], issue_after(first, config), now=later)
+    assert "comment" in {a.kind for a in p.actions()}
+    assert "just went past their fix deadline" in p.comments[0]
+    assert [a.number for a in p.newly_overdue] == [1]
 
 
 def test_stale_dependabot_pr_alone_keeps_issue_open(config):
-    actions, body, _ = plan(config, [], prs=[pr(3, "api", "Bump x from 1 to 2", 30)])
-    assert actions[0].kind == "create"
-    assert "stale" in body
+    p = plan(config, [], prs=[pr(3, "api", "Bump x from 1 to 2", 30)])
+    assert p.op == IssueOp.CREATE
+    assert "stale" in body(p, config)
 
 
 def test_clean_repo_closes_issue(config):
-    actions, body, comments = plan(config, [], issue={"number": 5, "body": "x"})
-    assert [a.kind for a in actions] == ["close"]
-    assert body is None and "resolved" in comments[0]
+    p = plan(config, [], issue={"number": 5, "body": "x"})
+    assert [a.kind for a in p.actions()] == ["close"]
+    assert p.op == IssueOp.CLOSE and "resolved" in p.comments[0]
+
+
+def test_green_fix_pr_pings_owners_once(config):
+    alerts = [alert(1, "api", "high", 10, package="axios")]
+    pending = [pr(9, "api", "Bump axios from 1.5.0 to 1.6.0", 3, ci="PENDING")]
+    first = plan(config, alerts, prs=pending)
+    assert "Ready to merge" not in body(first, config) and "CI running" in body(first, config)
+
+    # CI goes green: owners get one comment naming the alert it fixes.
+    green = [pr(9, "api", "Bump axios from 1.5.0 to 1.6.0", 4, ci="SUCCESS")]
+    p = plan(config, alerts, issue_after(first, config), prs=green)
+    assert [x.number for x in p.newly_ready] == [9] and p.pinged
+    assert len(p.comments) == 1 and "@acme/api" in p.comments[0]
+    assert "only waiting on a review" in p.comments[0] and "fixes high `axios`" in p.comments[0]
+    assert "✅ Ready to merge (1)" in body(p, config)
+
+    # Still green the next day: no repeat ping.
+    tomorrow = NOW + timedelta(days=1)
+    p = plan(config, alerts, issue_after(p, config), prs=green, now=tomorrow)
+    assert p.newly_ready == [] and p.comments == []
+
+
+def test_conflicting_or_draft_prs_are_not_ready(config):
+    conflicting = pr(9, "api", "Bump a from 1 to 2", 5, ci="SUCCESS")
+    conflicting["mergeable"] = "CONFLICTING"
+    draft = pr(10, "api", "Bump b from 1 to 2", 5, ci="SUCCESS")
+    draft["draft"] = True
+    fresh = pr(11, "api", "Bump c from 1 to 2", 0, ci="SUCCESS")
+    report = evaluate(config, [], [conflicting, draft, fresh], ["api"], NOW)["api"]
+    assert report.ready_prs == []
+
+
+def test_known_exploited_cve_gets_short_sla_and_escalates_immediately(config):
+    exploited = alert(1, "api", "medium", 4)
+    exploited["security_advisory"]["cve_id"] = "CVE-2024-0001"
+    p = plan(config, [exploited], kev=frozenset({"CVE-2024-0001"}))
+    a = p.report.alerts[0]
+    assert a.known_exploited and a.days_left == -1 and a.status == SlaStatus.OVERDUE
+    assert [x.number for x in p.escalate] == [1]
+    assert "actively exploited" in body(p, config)
+
+    config.kev.enabled = False
+    a = plan(config, [exploited], kev=frozenset({"CVE-2024-0001"})).report.alerts[0]
+    assert not a.known_exploited and a.status == SlaStatus.OK
+
+
+def test_exception_hides_alert_until_it_expires():
+    exception = {"package": "lodash", "repo": "api", "reason": "unused", "expires": "2026-12-01"}
+    config = parse_config({"org": "acme", "exceptions": [exception]})
+    p = plan(config, [alert(1, "api", "critical", 20)])
+    assert p.report.alerts == [] and len(p.report.accepted) == 1
+    assert p.op == IssueOp.NONE
+
+    later = NOW + timedelta(days=31)
+    report = evaluate(config, [alert(1, "api", "critical", 20)], [], ["api"], later)["api"]
+    assert [a.number for a in report.alerts] == [1] and report.accepted == []
+
+
+def test_exception_requires_reason_and_expiry():
+    with pytest.raises(ValueError, match="reason"):
+        parse_config({"org": "acme", "exceptions": [{"package": "lodash", "reason": "x"}]})
+    with pytest.raises(ValueError, match="advisory"):
+        parse_config({"org": "acme", "exceptions": [{"reason": "x", "expires": "2027-01-01"}]})
+
+
+def example_config():
+    return parse_config(yaml.safe_load((EXAMPLES / "vulgard.yml").read_text()))
+
+
+def demo():
+    clients = fixture_clients(EXAMPLES / "demo-org.json")
+    return clients.github, clients.kev()
 
 
 def test_nag_apply_against_fixture():
-    config = parse_config(yaml.safe_load((EXAMPLES / "vulgard.yml").read_text()))
-    gh = FixtureGitHub.from_file(EXAMPLES / "demo-org.json")
-    reports = collect(gh, config)
+    config = example_config()
+    gh, kev = demo()
+    reports = collect(gh, config, kev=kev)
     assert "sandbox-experiments" not in reports  # excluded
     assert "legacy-billing" not in reports  # archived
     assert reports["web-storefront"].owners == ["@acme/frontend", "@jlee"]  # from CODEOWNERS
     assert reports["payments-api"].owners == ["@acme/payments"]  # from config
+    assert [a.package for a in reports["web-storefront"].accepted] == ["nanoid"]
+    assert reports["payments-api"].known_exploited[0].package == "jsonwebtoken"
 
     nag(gh, config, reports, apply=True)
     ops = [(op, args[0]) for op, args in gh.writes]
     assert ("create_issue", "payments-api") in ops
     assert ("update_issue", "inventory-service") in ops  # closed
     assert gh.data["issues"]["inventory-service"]["state"] == "closed"
+    assert gh.data["issues"]["web-storefront"]["assignees"] == ["jlee"]
 
     # Second run right away is idempotent: no new issues or comments.
     gh.writes.clear()
-    nag(gh, config, collect(gh, config), apply=True)
+    nag(gh, config, collect(gh, config, kev=kev), apply=True)
     assert not [w for w in gh.writes if w[0] in ("create_issue", "comment_issue")]
+
+
+def test_linear_issue_lifecycle():
+    config = example_config()
+    gh = FixtureGitHub.from_file(EXAMPLES / "demo-org.json")
+    linear = FakeLinear()
+
+    def run():
+        reports = collect(gh, config)
+        return {r.repo: r for r in nag(gh, config, reports, apply=True, linear=linear)}
+
+    runs = run()
+    created = {}
+    for op, (ident, fields) in linear.writes:
+        if op == "create_issue":
+            created[fields["title"].split(":")[0]] = (ident, fields)
+    # Routed by owner, defaulting to SEC; priority and due date come from the worst alert.
+    assert created["payments-api"][0].startswith("PAY-")
+    pipeline_ident, pipeline = created["data-pipeline"]
+    assert pipeline_ident.startswith("SEC-")
+    assert pipeline["priority"] == 2 and "dueDate" in pipeline
+    assert created["web-storefront"][1]["assigneeId"] == "user:jlee@acme.com"
+    # The Linear link is persisted in the GitHub issue so later runs find it.
+    ref = TrackingState.from_body(gh.data["issues"]["payments-api"]["body"]).linear
+    assert ref.identifier == created["payments-api"][0]
+    assert ("attach_url", (ref.id, runs["payments-api"].issue_url)) in linear.writes
+    # The GitHub issue is written once on creation, with the Linear link already in it.
+    payments_writes = [(op, args) for op, args in gh.writes if args[0] == "payments-api"]
+    assert [op for op, _ in payments_writes] == ["ensure_label", "create_issue", "comment_issue"]
+    assert ref.url in payments_writes[1][1][2]
+
+    # Unchanged second run: no Linear writes.
+    linear.writes.clear()
+    run()
+    assert linear.writes == []
+
+    # Someone closes the Linear issue while alerts remain: vulgard reopens it.
+    linear.issues[ref.id]["state"] = {"type": "completed"}
+    runs = run()
+    assert linear.issues[ref.id]["state"]["type"] == "unstarted"
+    assert any("Reopened" in text for op, (_, text) in linear.writes if op == "comment")
+    assert "linear-update" in {a.kind for a in runs["payments-api"].actions}
+
+    # Alerts resolved: GitHub issue closes and so does the Linear issue.
+    alerts = gh.data["alerts"]
+    gh.data["alerts"] = [a for a in alerts if a["repository"]["name"] != "payments-api"]
+    gh.data["dependabot_prs"] = []
+    run()
+    assert linear.issues[ref.id]["state"]["type"] == "completed"
+
+
+def test_linear_escalation_is_commented_when_the_issue_is_created():
+    config = example_config()
+    gh, kev = demo()
+    linear = FakeLinear()
+    nag(gh, config, collect(gh, config, kev=kev), apply=True, linear=linear)
+    payments = next(i for i in linear.issues.values() if i["title"].startswith("payments-api:"))
+    comments = [text for op, (issue_id, text) in linear.writes if issue_id == payments["id"]]
+    assert any("Escalating" in str(text) for text in comments)
+
+
+def test_linear_ignores_a_ref_pointing_at_another_repos_issue():
+    config = example_config()
+    gh = FixtureGitHub.from_file(EXAMPLES / "demo-org.json")
+    linear = FakeLinear()
+    victim = linear.create_issue({"teamId": "team-OPS", "title": "unrelated: keep out"})
+    forged = TrackingState(linear=LinearRef(victim["id"], victim["identifier"], victim["url"]))
+    gh.data["issues"]["payments-api"] = {"number": 7, "body": forged.to_comment()}
+    linear.writes.clear()
+
+    nag(gh, config, collect(gh, config), apply=True, linear=linear)
+    touched = [args[0] for op, args in linear.writes if op != "create_issue"]
+    assert victim["id"] not in touched
+    assert victim["fields"]["title"] == "unrelated: keep out"
+    ref = TrackingState.from_body(gh.data["issues"]["payments-api"]["body"]).linear
+    assert ref.id != victim["id"]
+
+
+def test_slack_routes_to_team_channels_dms_and_escalation():
+    config = example_config()
+    gh, kev = demo()
+    runs = nag(gh, config, collect(gh, config, kev=kev), apply=False)
+    slack = FakeSlack()
+    notify_slack(slack, config, runs, apply=True)
+    by_target = {target: text for target, text in slack.messages}
+
+    assert "payments-api" in by_target["#payments-eng"]  # owner -> channel
+    assert "1 Dependabot PR(s) ready to merge" in by_target["#payments-eng"]
+    assert "web-storefront" in by_target["#frontend"]
+    assert "data-pipeline" in by_target["#eng-alerts"]  # default channel
+    assert "<@U012JLEE>" in by_target["#frontend"]  # GitHub handle -> Slack mention
+    assert "web-storefront" in by_target["U012JLEE"]  # DM to the individual owner
+    escalation = by_target["#security-escalations"]
+    assert escalation.startswith("<!subteam^S01SECURITY>") and "payments-api" in escalation
+
+
+def test_weekly_summary_flags_unexplained_dismissals():
+    gh = FixtureGitHub.from_file(EXAMPLES / "demo-org.json")
+    since = datetime.now(UTC) - timedelta(days=7)
+    repos = {"payments-api", "data-pipeline"}
+    closed = summarize_closed(gh.list_closed_alerts("acme", since), repos, since)
+    assert closed.fixed == {"payments-api": 1}
+    assert [(d.repo, d.by) for d in closed.unexplained] == [("data-pipeline", "mchen")]
+
+    config = example_config()
+    text, blocks = digest_message(config, collect(gh, config), closed)
+    rendered = json.dumps(blocks)
+    assert "1 fixed" in rendered and "no justification" in rendered and "mchen" in rendered
 
 
 def test_detect_ecosystems_skips_vendored_dirs():
