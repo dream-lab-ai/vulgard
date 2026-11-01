@@ -1,0 +1,46 @@
+# vulnguard configuration. `org` defaults to the owner of this repo when run from
+# the scheduled workflow (passed via --org), so it is left unset here.
+
+repos:
+  include: ["*"]
+  exclude: []            # e.g. ["sandbox-*", "legacy-monolith"]
+
+# Days from when an alert opened until it must be fixed.
+sla_days:
+  critical: 7
+  high: 30
+  medium: 90
+  low: 180
+
+due_soon_days: 5          # flag alerts this close to their deadline
+stale_pr_days: 14         # Dependabot PRs open this long get called out
+reminder_interval_days: 7 # how often to re-ping owners while anything is overdue
+
+# Who gets pinged. Falls back to the `*` rule in CODEOWNERS, then default_owners.
+owners: {}
+#   payments-api: ["@your-org/payments"]
+default_owners: []
+
+escalation:
+  after_days_overdue: 7
+  severities: [critical, high]
+  mentions: []            # e.g. ["@your-org/security", "@cto-handle"]
+
+issue:
+  label: vulnguard
+  title: "Security debt: vulnerable dependencies need attention"
+
+slack:
+  webhook_env: SLACK_WEBHOOK_URL
+
+rollout:
+  workflow_repo: vulnguard        # the repo hosting these reusable workflows
+  workflow_ref: main
+  fail_on_severity: high          # low | medium | high | critical
+  engine: github                  # github (needs GHAS on private repos) | osv
+  auto_merge: true
+  auto_merge_update_types:
+    - version-update:semver-patch
+    - version-update:semver-minor
+  schedule_interval: weekly
+  branch: vulnguard/rollout

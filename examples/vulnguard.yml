@@ -1,0 +1,14 @@
+org: acme
+repos:
+  include: ["*"]
+  exclude: ["sandbox-*"]
+owners:
+  payments-api: ["@acme/payments"]
+default_owners: ["@acme/platform"]
+escalation:
+  after_days_overdue: 7
+  severities: [critical, high]
+  mentions: ["@acme/security"]
+rollout:
+  workflow_repo: vulnguard
+  engine: osv

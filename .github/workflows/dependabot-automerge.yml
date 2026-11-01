@@ -1,0 +1,48 @@
+# Reusable: approve low-risk Dependabot PRs and turn on auto-merge, so they land as
+# soon as the repo's required checks pass. Major updates are left for a human.
+name: dependabot-automerge
+
+on:
+  workflow_call:
+    inputs:
+      update-types:
+        description: Comma-separated update types to auto-merge.
+        type: string
+        default: version-update:semver-patch,version-update:semver-minor
+      merge-method:
+        description: squash | merge | rebase
+        type: string
+        default: squash
+
+permissions:
+  contents: read
+
+jobs:
+  automerge:
+    if: github.event.pull_request.user.login == 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - id: meta
+        uses: dependabot/fetch-metadata@v2
+
+      - name: Approve and enable auto-merge
+        if: contains(format(',{0},', inputs.update-types), format(',{0},', steps.meta.outputs.update-type))
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          UPDATE_TYPE: ${{ steps.meta.outputs.update-type }}
+          MERGE_METHOD: ${{ inputs.merge-method }}
+        run: |
+          echo "Auto-merging $UPDATE_TYPE update"
+          gh pr review --approve "$PR_URL" --body "Auto-approved by vulnguard: $UPDATE_TYPE update." || \
+            echo "::warning::Could not approve. Enable 'Allow GitHub Actions to create and approve pull requests' in org settings if reviews are required."
+          gh pr merge --auto "--$MERGE_METHOD" "$PR_URL"
+
+      - name: Explain why this one needs a human
+        if: "!contains(format(',{0},', inputs.update-types), format(',{0},', steps.meta.outputs.update-type))"
+        env:
+          UPDATE_TYPE: ${{ steps.meta.outputs.update-type }}
+        run: echo "::notice::$UPDATE_TYPE is not auto-merged. A maintainer needs to review it."

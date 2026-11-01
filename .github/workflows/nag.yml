@@ -1,0 +1,45 @@
+# Scheduled job that updates per-repo tracking issues, pings owners, escalates overdue
+# alerts, and posts a Slack digest. Needs a GitHub App installed on the org (see README).
+name: vulnguard-nag
+
+on:
+  schedule:
+    - cron: "0 15 * * 1-5" # weekdays, 15:00 UTC
+  workflow_dispatch:
+    inputs:
+      apply:
+        description: Make changes (uncheck for a dry run)
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: vulnguard-nag
+  cancel-in-progress: false
+
+jobs:
+  nag:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: app-token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ vars.VULNGUARD_APP_ID }}
+          private-key: ${{ secrets.VULNGUARD_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+
+      - uses: astral-sh/setup-uv@v6
+
+      - name: Run vulnguard
+        env:
+          GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          APPLY: ${{ github.event_name == 'schedule' || inputs.apply }}
+        run: |
+          args=(--org "${{ github.repository_owner }}" nag --slack)
+          if [ "$APPLY" = "true" ]; then args+=(--apply); fi
+          uv run vulnguard "${args[@]}"

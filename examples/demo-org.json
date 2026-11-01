@@ -1,0 +1,122 @@
+{
+  "repos": [
+    {"id": 101, "name": "payments-api", "default_branch": "main", "archived": false},
+    {"id": 102, "name": "web-storefront", "default_branch": "main", "archived": false},
+    {"id": 103, "name": "inventory-service", "default_branch": "main", "archived": false},
+    {"id": 104, "name": "data-pipeline", "default_branch": "master", "archived": false},
+    {"id": 105, "name": "sandbox-experiments", "default_branch": "main", "archived": false},
+    {"id": 106, "name": "legacy-billing", "default_branch": "main", "archived": true},
+    {"id": 107, "name": "vulnguard", "default_branch": "main", "archived": false}
+  ],
+  "alerts": [
+    {
+      "number": 12,
+      "repository": {"name": "payments-api"},
+      "created_at": "@-19d",
+      "html_url": "https://github.com/acme/payments-api/security/dependabot/12",
+      "dependency": {"package": {"ecosystem": "npm", "name": "jsonwebtoken"}, "manifest_path": "package-lock.json"},
+      "security_advisory": {"ghsa_id": "GHSA-8cf7-32gw-wr33", "cve_id": "CVE-2022-23539", "summary": "Insecure key type validation allows signature bypass", "severity": "critical"},
+      "security_vulnerability": {"package": {"ecosystem": "npm", "name": "jsonwebtoken"}, "severity": "critical", "first_patched_version": {"identifier": "9.0.0"}}
+    },
+    {
+      "number": 14,
+      "repository": {"name": "payments-api"},
+      "created_at": "@-41d",
+      "html_url": "https://github.com/acme/payments-api/security/dependabot/14",
+      "dependency": {"package": {"ecosystem": "npm", "name": "axios"}, "manifest_path": "package-lock.json"},
+      "security_advisory": {"ghsa_id": "GHSA-wf5p-g6vw-rhxx", "cve_id": "CVE-2023-45857", "summary": "CSRF token leaked to third-party hosts", "severity": "high"},
+      "security_vulnerability": {"package": {"ecosystem": "npm", "name": "axios"}, "severity": "high", "first_patched_version": {"identifier": "1.6.0"}}
+    },
+    {
+      "number": 15,
+      "repository": {"name": "payments-api"},
+      "created_at": "@-3d",
+      "html_url": "https://github.com/acme/payments-api/security/dependabot/15",
+      "dependency": {"package": {"ecosystem": "npm", "name": "semver"}, "manifest_path": "package-lock.json"},
+      "security_advisory": {"ghsa_id": "GHSA-c2qf-rxjj-qqgw", "cve_id": "CVE-2022-25883", "summary": "Regular expression denial of service", "severity": "medium"},
+      "security_vulnerability": {"package": {"ecosystem": "npm", "name": "semver"}, "severity": "medium", "first_patched_version": {"identifier": "7.5.2"}}
+    },
+    {
+      "number": 3,
+      "repository": {"name": "web-storefront"},
+      "created_at": "@-87d",
+      "html_url": "https://github.com/acme/web-storefront/security/dependabot/3",
+      "dependency": {"package": {"ecosystem": "npm", "name": "postcss"}, "manifest_path": "package-lock.json"},
+      "security_advisory": {"ghsa_id": "GHSA-7fh5-64p2-3v2j", "cve_id": "CVE-2023-44270", "summary": "Line return parsing error", "severity": "medium"},
+      "security_vulnerability": {"package": {"ecosystem": "npm", "name": "postcss"}, "severity": "medium", "first_patched_version": {"identifier": "8.4.31"}}
+    },
+    {
+      "number": 4,
+      "repository": {"name": "web-storefront"},
+      "created_at": "@-10d",
+      "html_url": "https://github.com/acme/web-storefront/security/dependabot/4",
+      "dependency": {"package": {"ecosystem": "npm", "name": "nanoid"}, "manifest_path": "package-lock.json"},
+      "security_advisory": {"ghsa_id": "GHSA-qrpm-p2h7-hrv2", "cve_id": "CVE-2021-23566", "summary": "Information exposure via valueOf()", "severity": "low"},
+      "security_vulnerability": {"package": {"ecosystem": "npm", "name": "nanoid"}, "severity": "low", "first_patched_version": {"identifier": "3.1.31"}}
+    },
+    {
+      "number": 7,
+      "repository": {"name": "data-pipeline"},
+      "created_at": "@-62d",
+      "html_url": "https://github.com/acme/data-pipeline/security/dependabot/7",
+      "dependency": {"package": {"ecosystem": "pip", "name": "urllib3"}, "manifest_path": "requirements.txt"},
+      "security_advisory": {"ghsa_id": "GHSA-v845-jxx5-vc9f", "cve_id": "CVE-2023-43804", "summary": "Cookie header not stripped on cross-origin redirects", "severity": "high"},
+      "security_vulnerability": {"package": {"ecosystem": "pip", "name": "urllib3"}, "severity": "high", "first_patched_version": {"identifier": "2.0.6"}}
+    },
+    {
+      "number": 1,
+      "repository": {"name": "sandbox-experiments"},
+      "created_at": "@-300d",
+      "html_url": "https://github.com/acme/sandbox-experiments/security/dependabot/1",
+      "dependency": {"package": {"ecosystem": "npm", "name": "minimist"}, "manifest_path": "package-lock.json"},
+      "security_advisory": {"ghsa_id": "GHSA-xvch-5gv4-984h", "cve_id": "CVE-2021-44906", "summary": "Prototype pollution", "severity": "critical"},
+      "security_vulnerability": {"package": {"ecosystem": "npm", "name": "minimist"}, "severity": "critical", "first_patched_version": {"identifier": "1.2.6"}}
+    }
+  ],
+  "dependabot_prs": [
+    {
+      "number": 88,
+      "title": "Bump jsonwebtoken from 8.5.1 to 9.0.0",
+      "html_url": "https://github.com/acme/payments-api/pull/88",
+      "repository_url": "https://api.github.com/repos/acme/payments-api",
+      "created_at": "@-18d"
+    },
+    {
+      "number": 41,
+      "title": "Bump the npm_and_yarn group with 6 updates",
+      "html_url": "https://github.com/acme/web-storefront/pull/41",
+      "repository_url": "https://api.github.com/repos/acme/web-storefront",
+      "created_at": "@-33d"
+    },
+    {
+      "number": 19,
+      "title": "Bump eslint from 8.56.0 to 8.57.0",
+      "html_url": "https://github.com/acme/inventory-service/pull/19",
+      "repository_url": "https://api.github.com/repos/acme/inventory-service",
+      "created_at": "@-2d"
+    }
+  ],
+  "issues": {
+    "inventory-service": {
+      "number": 5,
+      "title": "Security debt: vulnerable dependencies need attention",
+      "body": "old report\n<!-- vulnguard-state {\"overdue\": [2], \"escalated\": [], \"last_reminder\": \"2026-01-01T00:00:00+00:00\"} -->",
+      "state": "open"
+    }
+  },
+  "files": {
+    "web-storefront": {
+      ".github/CODEOWNERS": "# Frontend team owns everything\n*       @acme/frontend @jlee\n/docs/  @acme/docs\n",
+      ".github/dependabot.yml": "version: 2\nupdates: []\n"
+    },
+    "inventory-service": {
+      ".github/workflows/vulnguard.yml": "name: vulnguard\n",
+      ".github/dependabot.yml": "version: 2\nupdates: []\n"
+    }
+  },
+  "trees": {
+    "payments-api": ["package.json", "package-lock.json", "Dockerfile", ".github/workflows/ci.yml", "src/index.ts"],
+    "data-pipeline": ["pyproject.toml", "jobs/ingest/requirements.txt", "infra/main.tf", "node_modules/x/package.json"],
+    "web-storefront": ["package.json", ".github/workflows/deploy.yml"]
+  }
+}
