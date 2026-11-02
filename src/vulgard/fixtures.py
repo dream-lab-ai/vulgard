@@ -7,8 +7,13 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+from .aws import sight_amplify_branch, sight_cfn_stack, sight_sst_objects
 from .clients import Clients
+from .config import IssueConfig
+from .estate import Deployment, Found, NativeRef, RunState, Sighting
+from .lifecycle import Op, SafeDelete, Verb
 from .policy import now_utc
+from .vercel import sight_vercel_project
 
 RELATIVE_RE = re.compile(r"^@-(\d+)d$")
 
@@ -24,13 +29,20 @@ def _resolve_dates(value: Any, now: datetime) -> Any:
     return value
 
 
+def issue_key(repo: str, label: str) -> str:
+    """Fixture key for a repo's tracking issue: the repo for the default label, else repo#label."""
+    return repo if label == IssueConfig().label else f"{repo}#{label}"
+
+
 class FixtureGitHub:
     """In-memory stand-in for the GitHub client, backed by a JSON file. Writes are recorded."""
 
     def __init__(self, data: dict[str, Any], now: datetime | None = None):
-        self.data = _resolve_dates(copy.deepcopy(data), now or now_utc())
+        self.now = now or now_utc()
+        self.data = _resolve_dates(copy.deepcopy(data), self.now)
         self.writes: list[tuple[str, tuple[Any, ...]]] = []
         self._next_issue = 1000
+        self._next_comment = 5000
 
     @classmethod
     def from_file(cls, path: str | Path, now: datetime | None = None) -> FixtureGitHub:
@@ -60,9 +72,21 @@ class FixtureGitHub:
     def list_tree_paths(self, org: str, repo: str, branch: str) -> list[str]:
         return self.data.get("trees", {}).get(repo, [])
 
-    def find_open_issue(self, org: str, repo: str, label: str) -> dict[str, Any] | None:
-        issue = self.data.get("issues", {}).get(repo)
-        return issue if issue and issue.get("state", "open") == "open" else None
+    def list_commits(self, org: str, repo: str, branch: str, n: int = 30) -> list[dict[str, Any]]:
+        return [
+            {"commit": {"committer": {"date": c["date"]}}, "author": {"login": c.get("login", "")}}
+            for c in self.data.get("commits", {}).get(repo, [])
+        ][:n]
+
+    def find_issue(self, org: str, repo: str, label: str) -> dict[str, Any] | None:
+        return self.data.get("issues", {}).get(issue_key(repo, label))
+
+    def list_issue_comments(self, org: str, repo: str, number: int) -> list[dict[str, Any]]:
+        return self.data.get("comments", {}).get(f"{repo}#{number}", [])
+
+    def can_write(self, org: str, repo: str, user: str) -> bool:
+        writers = self.data.get("writers")
+        return writers is None or user in writers
 
     def find_open_pr(self, org: str, repo: str, head_branch: str) -> dict[str, Any] | None:
         return self.data.get("open_prs", {}).get(repo, {}).get(head_branch)
@@ -94,18 +118,35 @@ class FixtureGitHub:
             "html_url": f"https://github.com/{org}/{repo}/issues/{self._next_issue}",
             "assignees": assignees or [],
         }
-        self.data.setdefault("issues", {})[repo] = issue
+        self.data.setdefault("issues", {})[issue_key(repo, labels[0])] = issue
         self._record("create_issue", repo, title, body)
         return issue
 
     def update_issue(self, org: str, repo: str, number: int, **fields: Any) -> dict[str, Any]:
-        issue = self.data["issues"][repo]
+        issue = next(
+            i
+            for key, i in self.data["issues"].items()
+            if key.split("#")[0] == repo and i["number"] == number
+        )
         issue.update(fields)
         self._record("update_issue", repo, number, fields)
         return issue
 
     def comment_issue(self, org: str, repo: str, number: int, body: str) -> None:
+        """Recorded, and added to the thread as the bot, so later runs read it back."""
         self._record("comment_issue", repo, number, body)
+        self._next_comment += 1
+        thread = self.data.setdefault("comments", {}).setdefault(f"{repo}#{number}", [])
+        thread.append(
+            {
+                "id": self._next_comment,
+                "user": {"login": "vulgard[bot]"},
+                "body": body,
+                "created_at": self.now.isoformat(),
+                "html_url": f"https://github.com/{org}/{repo}/issues/{number}"
+                f"#issuecomment-{self._next_comment}",
+            }
+        )
 
     def create_branch(self, org: str, repo: str, branch: str, sha: str) -> None:
         self._record("create_branch", repo, branch)
@@ -205,6 +246,31 @@ class FakeLinear:
         self.writes.append(("attach_url", (issue_id, url)))
 
 
+class FixtureScanner:
+    """Replays raw AWS and Vercel API shapes from the fixture through the real parsers."""
+
+    def __init__(self, data: dict[str, Any]):
+        self._aws = data.get("aws") or {}
+        self._vercel = data.get("vercel") or {}
+
+    def scan(self) -> list[Sighting]:
+        account, region = self._aws.get("account", "000000000000"), "us-east-1"
+        found = [
+            s for st in self._aws.get("stacks", []) if (s := sight_cfn_stack(st, account, region))
+        ]
+        sst = self._aws.get("sst")
+        if sst:
+            found += sight_sst_objects(sst["objects"], sst["bucket"], account, region)
+        for entry in self._aws.get("amplify", []):
+            for b in entry["branches"]:
+                found.append(sight_amplify_branch(entry["app"], b, b.get("job"), account, region))
+        team = self._vercel.get("team_id", "team_demo")
+        found += [
+            s for p in self._vercel.get("projects", []) if (s := sight_vercel_project(p, team))
+        ]
+        return found
+
+
 class FakeSlack:
     def __init__(self) -> None:
         self.messages: list[tuple[str, str]] = []
@@ -213,9 +279,49 @@ class FakeSlack:
         self.messages.append((channel, text))
 
 
+class FixtureExecutor:
+    """Records the ops it is asked to start. `data["ops"]` maps the request ids of ops that
+    already exist to a link, or to `{"url", "state", "why"}` for one that ended. `observe`
+    re-reads targets from the same estate the scanner replays."""
+
+    def __init__(self, data: dict[str, Any]):
+        self.data = data
+        self.started: list[tuple[Verb, Deployment, str]] = []
+
+    def observe(self, native: NativeRef) -> Sighting | None:
+        return next((s for s in FixtureScanner(self.data).scan() if s.native == native), None)
+
+    def find(self, op: Op) -> Found | None:
+        existing = self.data.get("ops", {}).get(op.request_id)
+        if existing is None:
+            return None
+        if isinstance(existing, str):
+            return Found(existing)
+        return Found(existing["url"], RunState(existing["state"]), existing.get("why", ""))
+
+    def redeploy(self, d: Deployment, request_id: str) -> str:
+        return self._start(Verb.REDEPLOY, d, request_id)
+
+    def delete(self, proof: SafeDelete, request_id: str) -> str:
+        return self._start(Verb.DELETE, proof.deployment, request_id)
+
+    def _start(self, verb: Verb, d: Deployment, request_id: str) -> str:
+        self.started.append((verb, d, request_id))
+        url = f"https://example.test/ops/{request_id}"
+        self.data.setdefault("ops", {})[request_id] = url
+        return url
+
+
 def fixture_clients(path: str | Path) -> Clients:
     gh = FixtureGitHub.from_file(path)
     kev = frozenset(gh.data.get("kev", []))
+    executor = FixtureExecutor(gh.data)
     return Clients(
-        github=gh, linear=FakeLinear(), slack=FakeSlack(), slack_webhook=None, kev=lambda: kev
+        github=gh,
+        linear=FakeLinear(),
+        slack=FakeSlack(),
+        slack_webhook=None,
+        kev=lambda: kev,
+        scanners=lambda: [FixtureScanner(gh.data)],
+        executor=lambda: executor,
     )

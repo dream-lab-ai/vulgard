@@ -1,16 +1,16 @@
 from __future__ import annotations
 
 import time
-from collections import Counter, defaultdict
+from collections import defaultdict
 from collections.abc import Callable
+from dataclasses import dataclass, field
 from functools import partial
-from typing import Any, Protocol
+from typing import Any, Protocol, assert_never
 
 import httpx
 
 from .config import Config, route
-from .plan import Action, ActionKind, IssueOp, RepoRun
-from .policy import ClosedSummary, RepoReport, org_totals
+from .plan import Action, ActionKind, IssueOp, RepoRun, TopicSpec
 
 API_URL = "https://slack.com/api"
 MAX_ROWS = 15
@@ -69,7 +69,7 @@ def _post(target: str, detail: str, send: Callable[[], None], apply: bool) -> Ac
 
 
 def _repo_link(org: str, repo: str, issue_url: str | None) -> str:
-    url = issue_url or f"https://github.com/{org}/{repo}/security/dependabot"
+    url = issue_url or f"https://github.com/{org}/{repo}/issues"
     return f"<{url}|{repo}>"
 
 
@@ -78,73 +78,70 @@ def _owner_mentions(owners: list[str], config: Config) -> str:
 
 
 def _repo_line(run: RepoRun, config: Config) -> str:
-    plan, r = run.plan, run.plan.report
-    parts = ["new tracking issue"] if plan.op == IssueOp.CREATE else []
-    if plan.newly_overdue:
-        parts.append(f"*{len(plan.newly_overdue)} newly overdue*")
-    if r.overdue:
-        parts.append(f"{len(r.overdue)} overdue")
-    if r.due_soon:
-        parts.append(f"{len(r.due_soon)} due soon")
-    if r.known_exploited:
-        parts.append(f"🔥 {len(r.known_exploited)} actively exploited")
-    if r.ready_prs:
-        links = ", ".join(f"<{p.html_url}|#{p.number}>" for p in r.ready_prs[:5])
-        parts.append(f"*✅ {len(r.ready_prs)} Dependabot PR(s) ready to merge* ({links})")
-    if r.stale_prs:
-        parts.append(f"{len(r.stale_prs)} stale Dependabot PR(s)")
-    owners = _owner_mentions(r.owners, config)
-    line = f"• *{_repo_link(config.org, r.repo, run.issue_url)}*: {', '.join(parts)}"
+    plan = run.plan
+    match plan.op:
+        case IssueOp.CREATE:
+            parts = ["new tracking issue"]
+        case IssueOp.REOPEN:
+            parts = ["tracking issue reopened"]
+        case IssueOp.UPDATE | IssueOp.CLOSE | IssueOp.NONE:
+            parts = []
+        case _ as unreachable:
+            assert_never(unreachable)
+    if plan.digest:
+        parts.append(plan.digest)
+    owners = _owner_mentions(plan.owners, config)
+    line = f"• *{_repo_link(config.org, plan.repo, run.issue_url)}*: {', '.join(parts)}"
     return line + (f" · {owners}" if owners else "")
 
 
 def _escalation_line(run: RepoRun, config: Config) -> str:
-    escalate = run.plan.escalate
-    worst = ", ".join(
-        f"{a.severity} `{a.package}` {-a.days_left}d overdue"
-        + (" 🔥" if a.known_exploited else "")
-        for a in escalate[:3]
-    )
-    more = f" (+{len(escalate) - 3} more)" if len(escalate) > 3 else ""
-    owners = _owner_mentions(run.plan.report.owners, config)
+    assert run.plan.escalation is not None
+    owners = _owner_mentions(run.plan.owners, config)
     link = _repo_link(config.org, run.repo, run.issue_url)
-    return f"• *{link}*: {worst}{more}" + (f" · owners {owners}" if owners else "")
+    detail = run.plan.escalation.slack_detail
+    return f"• *{link}*: {detail}" + (f" · owners {owners}" if owners else "")
+
+
+@dataclass
+class _TopicMessages:
+    spec: TopicSpec
+    channels: dict[str, list[str]] = field(default_factory=lambda: defaultdict(list))
+    dms: dict[str, list[str]] = field(default_factory=lambda: defaultdict(list))
+    escalations: list[str] = field(default_factory=list)
 
 
 def notify_slack(
     client: SlackClient, config: Config, runs: list[RepoRun], apply: bool
 ) -> list[Action]:
-    channels: dict[str, list[str]] = defaultdict(list)
-    dms: dict[str, list[str]] = defaultdict(list)
-    escalations: list[str] = []
+    """Per topic: a digest per routed channel, DMs to owners, and the escalation channel."""
+    topics: dict[str, _TopicMessages] = {}
     for run in runs:
-        if not run.plan.pinged:
+        plan = run.plan
+        if not plan.pinged:
             continue
-        owners = run.plan.report.owners
+        msgs = topics.setdefault(plan.spec.topic, _TopicMessages(plan.spec))
         line = _repo_line(run, config)
-        channel = route(config.slack.channels, run.repo, owners, config.slack.default_channel)
+        channel = route(config.slack.channels, run.repo, plan.owners, config.slack.default_channel)
         if channel:
-            channels[channel].append(line)
-        if run.plan.escalate:
-            escalations.append(_escalation_line(run, config))
+            msgs.channels[channel].append(line)
+        if plan.escalation:
+            msgs.escalations.append(_escalation_line(run, config))
         if config.slack.dm_owners:
-            for owner in owners:
+            for owner in [*plan.owners, *plan.dm]:
                 user = config.slack.dm_target(owner)
-                if user and line not in dms[user]:
-                    dms[user].append(line)
+                if user and line not in msgs.dms[user]:
+                    msgs.dms[user].append(line)
 
-    messages: list[tuple[str, str, list[str]]] = [
-        (channel, "Vulnerable dependencies need attention in these repos:", lines)
-        for channel, lines in channels.items()
-    ]
-    if escalations and config.slack.escalation_channel:
-        leads = "".join(f"{config.slack.mention(m)} " for m in config.escalation.mentions)
-        header = f"{leads}🚨 Escalation: these alerts are well past their fix deadline."
-        messages.append((config.slack.escalation_channel, header, escalations))
-    messages += [
-        (user, "Updates on vulnerable dependencies in repos you own:", lines)
-        for user, lines in dms.items()
-    ]
+    messages: list[tuple[str, str, list[str]]] = []
+    for msgs in topics.values():
+        spec = msgs.spec
+        messages += [(ch, spec.slack_header, lines) for ch, lines in msgs.channels.items()]
+        if msgs.escalations and config.slack.escalation_channel:
+            leads = "".join(f"{config.slack.mention(m)} " for m in config.escalation.mentions)
+            header = leads + spec.escalation_header
+            messages.append((config.slack.escalation_channel, header, msgs.escalations))
+        messages += [(user, spec.slack_dm_header, lines) for user, lines in msgs.dms.items()]
     return [
         _post(
             target,
@@ -160,92 +157,19 @@ def _section(text: str) -> dict[str, Any]:
     return {"type": "section", "text": {"type": "mrkdwn", "text": text[:3000]}}
 
 
-def team_of(report: RepoReport) -> str:
-    """The repo's first team owner, else its first owner. Used to group the leaderboard."""
-    owners = report.owners
-    return next((o for o in owners if "/" in o), owners[0] if owners else "unowned")
-
-
-def _ranking(title: str, rows: list[str], medals: bool) -> dict[str, Any]:
+def ranking(title: str, rows: list[str], medals: bool) -> str:
     lines = [
         f"{MEDALS[i] if medals and i < len(MEDALS) else f'{i + 1}.'} {row}"
         for i, row in enumerate(rows[:LEADERBOARD_ROWS])
     ]
-    return _section(f"*{title}*\n" + "\n".join(lines))
+    return f"*{title}*\n" + "\n".join(lines)
 
 
-def leaderboard_message(
-    config: Config, reports: dict[str, RepoReport], closed: ClosedSummary | None
-) -> tuple[str, list[dict[str, Any]]]:
-    """Weekly org-wide scoreboard for `slack.default_channel`. Names teams without pinging."""
-    org = config.org
-    ranked = sorted(
-        (
-            r
-            for r in reports.values()
-            if r.overdue or r.stale_prs or r.known_exploited or r.ready_prs
-        ),
-        key=lambda r: -r.risk_score,
-    )
-    totals = org_totals(reports)
-    fixed = closed.fixed if closed is not None else Counter()
-    header = (
-        f"*🏆 Vulnerability leaderboard for {org}*: {sum(fixed.values())} fixed in the "
-        f"last 7 days, {totals.overdue} past deadline, {totals.exploited} actively exploited."
-    )
-    blocks: list[dict[str, Any]] = [_section(header)]
-
-    fixed_by_team: Counter[str] = Counter()
-    for repo, n in fixed.items():
-        fixed_by_team[team_of(reports[repo])] += n
-    if fixed_by_team:
-        rows = [f"{team}: {n}" for team, n in fixed_by_team.most_common()]
-        blocks.append(_ranking("Most fixed this week", rows, medals=True))
-
-    overdue_by_team: Counter[str] = Counter()
-    exploited_by_team: Counter[str] = Counter()
-    for r in reports.values():
-        overdue_by_team[team_of(r)] += len(r.overdue)
-        exploited_by_team[team_of(r)] += len(r.known_exploited)
-    rows = [
-        f"{team}: {n} overdue"
-        + (f" (🔥 {exploited_by_team[team]} exploited)" if exploited_by_team[team] else "")
-        for team, n in (+overdue_by_team).most_common()
-    ]
-    if rows:
-        blocks.append(_ranking("Most overdue", rows, medals=False))
-
-    if totals.ready_prs:
-        blocks.append(
-            _section(f"*✅ {totals.ready_prs} Dependabot PR(s) pass CI and only need a merge.*")
-        )
-
-    if closed is not None:
-        if closed.unexplained:
-            rows = [
-                f"• <{d.html_url}|{d.repo}#{d.number}> {d.severity} `{d.package}` dismissed as "
-                f"_{d.reason}_ by @{d.by} with no comment"
-                for d in closed.unexplained[:10]
-            ]
-            title = "⚠️ *High-severity dismissals with no justification:*"
-            blocks.append(_section(title + "\n" + "\n".join(rows)))
-
-    rows = [
-        f"• <https://github.com/{org}/{r.repo}/security/dependabot|{r.repo}>: "
-        f"{len(r.overdue)} overdue, {len(r.stale_prs)} stale PR(s)"
-        + (f", ✅ {len(r.ready_prs)} ready" if r.ready_prs else "")
-        + (f", 🔥 {len(r.known_exploited)} exploited" if r.known_exploited else "")
-        + (f" (owners: {', '.join(r.owners)})" if r.owners else "")
-        for r in ranked[:MAX_ROWS]
-    ]
-    if len(ranked) > MAX_ROWS:
-        rows.append(f"…and {len(ranked) - MAX_ROWS} more.")
-    if rows:
-        blocks.append(_section("*Repos needing attention*\n" + "\n".join(rows)))
-    else:
-        blocks.append(_section("Nothing overdue. 🎉"))
-    text = "\n\n".join(b["text"]["text"] for b in blocks)
-    return text, blocks
+def leaderboard_message(blocks: list[str]) -> tuple[str, list[dict[str, Any]]]:
+    """The weekly org-wide scoreboard for `slack.default_channel`, from the mrkdwn blocks each
+    topic produced."""
+    sections = [_section(b) for b in blocks]
+    return "\n\n".join(b["text"]["text"] for b in sections), sections
 
 
 def send_leaderboard(

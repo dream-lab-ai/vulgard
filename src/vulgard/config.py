@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import fnmatch
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date
+from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
@@ -151,6 +152,120 @@ class RiskException:
     repo: str = "*"
 
 
+class Tier(StrEnum):
+    """How much vulgard may do with a deployment, by blast radius."""
+
+    PRODUCTION = "production"  # notify only; vulgard never deletes it, even when asked
+    SHARED = "shared"  # notify; redeploy or delete only on a human request
+    PERSONAL = "personal"  # notify; automatic redeploy or delete when the repo opts in
+
+
+DEFAULT_TIER_SEVERITY = {"production": "high", "shared": "medium", "personal": "low"}
+
+
+@dataclass
+class AwsConfig:
+    regions: list[str] = field(default_factory=lambda: ["us-east-1"])
+    delete_role_arn: str | None = None  # CloudFormation service role that deletes stacks
+    deploy_role_arn: str | None = None  # the role repos deploy with, for vulgard-lifecycle.yml
+
+
+@dataclass
+class VercelConfig:
+    team_id: str | None = None
+    token_env: str = "VERCEL_TOKEN"
+
+
+@dataclass(frozen=True)
+class LinearOverride:
+    """Per-topic Linear settings that replace the routed `linear` ones when set."""
+
+    labels: list[str] | None = None
+    project: str | None = None
+    state: str | None = None
+
+    def apply(self, target: LinearTarget) -> LinearTarget:
+        return replace(
+            target,
+            labels=target.labels if self.labels is None else tuple(self.labels),
+            project=self.project or target.project,
+            state=self.state or target.state,
+        )
+
+
+@dataclass
+class AutoConfig:
+    """Automatic redeploys and deletes of PERSONAL deployments. Off unless `repos` matches."""
+
+    repos: list[str] = field(default_factory=list)  # opt-in globs; [] means nowhere
+    delete: bool = False  # False: redeploy only
+    personal_stale_days: int = 90
+    notice_days: int = 7
+
+    def enabled_for(self, repo: str | None) -> bool:
+        return repo is not None and any(fnmatch.fnmatch(repo, p) for p in self.repos)
+
+
+@dataclass
+class DeploymentsConfig:
+    """The stale-deployments topic. Without `enabled`, no AWS or Vercel client is built."""
+
+    enabled: bool = False
+    report_only: bool = False  # findings go to the step summary only: no issues, Linear, Slack
+    stale_days: int = 30
+    baseline_days: int = 14  # time to act once flagged, before it's overdue
+    repo_inactive_days: int = 90
+    max_keep_days: int = 180
+    production_stages: list[str] = field(default_factory=lambda: ["production", "prod", "live"])
+    shared_stages: list[str] = field(
+        default_factory=lambda: ["development", "dev", "staging", "stage", "preview", "test"]
+    )
+    severity: dict[str, str] = field(default_factory=lambda: dict(DEFAULT_TIER_SEVERITY))
+    repo_severity: str = "low"
+    people: dict[str, str] = field(default_factory=dict)  # stage / OS username -> "@handle"
+    attribution: dict[str, str] = field(default_factory=dict)  # app or stack glob -> repo
+    ignore: list[str] = field(default_factory=list)  # app or stack globs never tracked
+    unattributed_repo: str | None = None  # where deployments with no known repo are tracked
+    workflows: dict[str, str] = field(default_factory=dict)  # repo -> lifecycle workflow file
+    lifecycle_workflow: str = "vulgard-lifecycle.yml"
+    label: str = "vulgard-stale"
+    title: str = "Stale deployments need a baseline"
+    aws: AwsConfig = field(default_factory=AwsConfig)
+    vercel: VercelConfig = field(default_factory=VercelConfig)
+    auto: AutoConfig = field(default_factory=AutoConfig)
+    linear: LinearOverride = field(default_factory=LinearOverride)
+
+    def __post_init__(self) -> None:
+        self.severity = {
+            **DEFAULT_TIER_SEVERITY,
+            **{k.lower(): v.lower() for k, v in self.severity.items()},
+        }
+        bad = set(self.severity) - {t.value for t in Tier}
+        if bad:
+            raise ValueError(f"deployments.severity: unknown tiers {', '.join(sorted(bad))}")
+        bad = {v for v in [*self.severity.values(), self.repo_severity] if v not in SEVERITIES}
+        if bad:
+            raise ValueError(f"deployments: unknown severities {', '.join(sorted(bad))}")
+        both = set(self.production_stages) & set(self.shared_stages)
+        if both:
+            raise ValueError(
+                f"deployments: stages can't be both production and shared: {', '.join(both)}"
+            )
+        bad_people = [k for k, v in self.people.items() if not v.startswith("@")]
+        if bad_people:
+            raise ValueError(
+                f"deployments.people values are GitHub handles starting with @: {bad_people}"
+            )
+        if self.enabled and not self.unattributed_repo:
+            raise ValueError(
+                "deployments.unattributed_repo is required: deployments with no known repo "
+                "are tracked there"
+            )
+
+    def workflow_for(self, repo: str) -> str:
+        return self.workflows.get(repo, self.lifecycle_workflow)
+
+
 @dataclass
 class Config:
     org: str
@@ -170,6 +285,7 @@ class Config:
     linear: LinearConfig = field(default_factory=LinearConfig)
     kev: KevConfig = field(default_factory=KevConfig)
     exceptions: list[RiskException] = field(default_factory=list)
+    deployments: DeploymentsConfig = field(default_factory=DeploymentsConfig)
 
     def repo_selected(self, name: str) -> bool:
         if any(fnmatch.fnmatch(name, pat) for pat in self.exclude):
@@ -193,13 +309,34 @@ def route[T](mapping: dict[str, T], repo: str, owners: list[str], default: T | N
     return default
 
 
-def _section(raw: dict[str, Any], key: str, cls: type) -> Any:
+def team_of_owners(owners: list[str]) -> str:
+    """The first team owner, else the first owner. Used to group leaderboards."""
+    return next((o for o in owners if "/" in o), owners[0] if owners else "unowned")
+
+
+def _section(raw: dict[str, Any], key: str, cls: Any) -> Any:
     data = raw.get(key) or {}
     known = {f for f in cls.__dataclass_fields__}
     unknown = set(data) - known
     if unknown:
         raise ValueError(f"Unknown keys in '{key}': {', '.join(sorted(unknown))}")
     return cls(**data)
+
+
+DEPLOYMENT_SECTIONS: tuple[tuple[str, type], ...] = (
+    ("aws", AwsConfig),
+    ("vercel", VercelConfig),
+    ("auto", AutoConfig),
+    ("linear", LinearOverride),
+)
+
+
+def parse_deployments(raw: dict[str, Any]) -> DeploymentsConfig:
+    unknown = set(raw) - set(DeploymentsConfig.__dataclass_fields__)
+    if unknown:
+        raise ValueError(f"Unknown keys in 'deployments': {', '.join(sorted(unknown))}")
+    nested = {key: _section(raw, key, cls) for key, cls in DEPLOYMENT_SECTIONS}
+    return DeploymentsConfig(**{**raw, **nested})
 
 
 def _parse_exceptions(items: list[dict[str, Any]] | None) -> list[RiskException]:
@@ -260,6 +397,7 @@ def parse_config(raw: dict[str, Any], org_override: str | None = None) -> Config
         linear=_section(raw, "linear", LinearConfig),
         kev=_section(raw, "kev", KevConfig),
         exceptions=_parse_exceptions(raw.get("exceptions")),
+        deployments=parse_deployments(raw.get("deployments") or {}),
     )
 
 

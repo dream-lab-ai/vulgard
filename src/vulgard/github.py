@@ -87,7 +87,7 @@ class GitHub:
         """Fetch every page; with `until`, stop at the first item it matches (exclusive)."""
         items: list[Any] = []
         next_url: str | None = url
-        next_params = {"per_page": 100, **(params or {})}
+        next_params: dict[str, Any] | None = {"per_page": 100, **(params or {})}
         while next_url:
             resp = self._request("GET", next_url, params=next_params)
             data = resp.json()
@@ -175,14 +175,70 @@ class GitHub:
             raise
         return [t["path"] for t in data.get("tree", []) if t.get("type") == "blob"]
 
-    def find_open_issue(self, org: str, repo: str, label: str) -> dict[str, Any] | None:
+    def list_commits(self, org: str, repo: str, branch: str, n: int = 30) -> list[dict[str, Any]]:
+        """The latest `n` commits on `branch`, newest first. Empty for an empty repo."""
+        try:
+            return self._json(
+                "GET", f"/repos/{org}/{repo}/commits", params={"sha": branch, "per_page": n}
+            )
+        except GitHubError as e:
+            if e.status in (404, 409):
+                return []
+            raise
+
+    def find_issue(self, org: str, repo: str, label: str) -> dict[str, Any] | None:
+        """The open issue with this label, else the most recently created closed one."""
         issues = self._json(
             "GET",
             f"/repos/{org}/{repo}/issues",
-            params={"labels": label, "state": "open", "per_page": 10},
+            params={"labels": label, "state": "all", "sort": "created", "per_page": 20},
         )
         issues = [i for i in issues if "pull_request" not in i]
-        return issues[0] if issues else None
+        return next((i for i in issues if i["state"] == "open"), issues[0] if issues else None)
+
+    def find_workflow_run(
+        self, org: str, repo: str, workflow: str, marker: str
+    ) -> dict[str, Any] | None:
+        """The newest recent dispatched run of `workflow` whose run name contains `marker`."""
+        try:
+            data = self._json(
+                "GET",
+                f"/repos/{org}/{repo}/actions/workflows/{workflow}/runs",
+                params={"event": "workflow_dispatch", "per_page": 50},
+            )
+        except GitHubError as e:
+            if e.status == 404:
+                return None
+            raise
+        runs = data.get("workflow_runs", [])
+        return next((r for r in runs if marker in (r.get("display_title") or "")), None)
+
+    def dispatch_workflow(
+        self, org: str, repo: str, workflow: str, ref: str, inputs: dict[str, str]
+    ) -> None:
+        self._json(
+            "POST",
+            f"/repos/{org}/{repo}/actions/workflows/{workflow}/dispatches",
+            json={"ref": ref, "inputs": inputs},
+        )
+
+    def list_issue_comments(self, org: str, repo: str, number: int) -> list[dict[str, Any]]:
+        return self._paginate(f"/repos/{org}/{repo}/issues/{number}/comments")
+
+    def can_write(self, org: str, repo: str, user: str) -> bool:
+        """Whether `user` has write, maintain or admin access to the repo. `permission` is the
+        legacy four-level field, where maintain reads as write; `role_name` names the role."""
+        try:
+            data = self._json("GET", f"/repos/{org}/{repo}/collaborators/{user}/permission")
+        except GitHubError as e:
+            if e.status == 404:
+                return False
+            raise
+        return data.get("permission") in ("write", "admin") or data.get("role_name") in (
+            "write",
+            "maintain",
+            "admin",
+        )
 
     def find_open_pr(self, org: str, repo: str, head_branch: str) -> dict[str, Any] | None:
         prs = self._json(

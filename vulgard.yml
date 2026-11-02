@@ -84,3 +84,40 @@ rollout:
     - version-update:semver-minor
   schedule_interval: weekly
   branch: vulgard/rollout
+
+# Stale deployments: every stack needs a deploy every `stale_days`, every repo a human commit
+# every `repo_inactive_days`. Anything older needs a baseline within `baseline_days`: redeploy,
+# delete, or `/vulgard keep` / `/vulgard active` on the repo's `vulgard-stale` issue.
+deployments:
+  enabled: false                  # also scans AWS (CloudFormation, SST, Amplify) and Vercel
+  report_only: false              # true: findings in the step summary only; no issues or pings
+  stale_days: 30
+  baseline_days: 14
+  repo_inactive_days: 90
+  max_keep_days: 180              # the longest `/vulgard keep … until` or `active until`
+  production_stages: [production, prod, live]   # a match anywhere in the name or tags
+  shared_stages: [development, dev, staging, stage, preview, test]
+  severity: {production: high, shared: medium, personal: low}  # drives escalation and Linear
+  repo_severity: low              # for inactive repos
+  people: {}                      # stage or OS username -> GitHub handle; marks personal stacks
+#   jlee: "@jlee"
+  attribution: {}                 # app or stack glob -> repo, wins over tags and manifests
+  ignore: []                      # app or stack globs never tracked
+  unattributed_repo: null         # required: deployments with no known repo are tracked here
+  label: vulgard-stale
+  title: Stale deployments need a baseline
+  linear: {}                      # labels/project/state for this topic's Linear issues
+  workflows: {}                   # repo -> its own deploy workflow, instead of vulgard-lifecycle.yml
+  lifecycle_workflow: vulgard-lifecycle.yml
+  auto:                           # automatic ops on personal deployments; off unless repos match
+    repos: []                     # opt-in globs, e.g. ["pam-*"]
+    delete: false                 # false: redeploy them; true: delete them
+    personal_stale_days: 90
+    notice_days: 7                # notice on the issue first; keep or cancel stops it
+  aws:
+    regions: [us-east-1]          # credentials come from the environment (GitHub OIDC in CI)
+    delete_role_arn: null         # CloudFormation service role that deletes stacks' resources
+    deploy_role_arn: null         # the role repos deploy with, for vulgard-lifecycle.yml
+  vercel:
+    team_id: null                 # with $VERCEL_TOKEN set, Vercel projects are scanned too
+    token_env: VERCEL_TOKEN

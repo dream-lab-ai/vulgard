@@ -15,9 +15,31 @@ Turning on Dependabot isn't enough if nobody merges its PRs. vulgard covers the 
 
 Everything that writes to GitHub runs as a **dry run by default**. Add `--apply` to make changes.
 
-New to this project, or to Dependabot? Start with **[How vulgard works](docs/how-it-works.md)**.
-It explains the terms, follows one alert from opening to closing, and walks through the code.
-This README is the setup and reference guide.
+## Documentation
+
+This README is the setup and reference guide. The rest of the docs are written for someone new
+to the project.
+
+**To understand how it works:**
+
+- [How vulgard works](docs/how-it-works.md) explains the terms, follows one alert from opening
+  to closing, and walks through the code. Start here if you're new to the project or to
+  Dependabot.
+- [How stale deployments work](docs/stale-deployments.md) does the same for deployments nobody
+  has updated in a while.
+- [The stale-deployments design doc](docs/design/stale-deployments.md) explains why it's
+  built the way it is.
+
+**If vulgard pinged you:**
+
+- [Fix the alerts on a vulgard tracking issue](docs/guides/fix-vulnerability-alerts.md)
+- [Respond to a stale-deployments issue](docs/guides/respond-to-stale-deployments.md)
+- [Use your own deploy workflow](docs/guides/use-your-own-deploy-workflow.md), if vulgard's
+  generic one can't deploy your repo
+- [Troubleshooting](docs/guides/troubleshooting.md)
+
+**If you run vulgard:** follow [Rolling it out](#rolling-it-out-to-a-real-org) below, then
+[Set up stale deployments](docs/guides/set-up-stale-deployments.md).
 
 ## How it fits together
 
@@ -26,7 +48,9 @@ this repo (acme/vulgard)
 ├── .github/workflows/nag.yml             scheduled: vulgard nag --apply --slack --linear
 ├── .github/workflows/guard.yml           reusable PR check (GitHub or OSV engine)
 ├── .github/workflows/automerge.yml       reusable auto-merge for Dependabot PRs
-└── .github/workflows/guard-required.yml  for `enforce --mode workflow`
+├── .github/workflows/guard-required.yml  for `enforce --mode workflow`
+├── .github/workflows/lifecycle.yml       reusable redeploy and remove, for stale deployments
+└── infra/                                CDK app for the AWS roles stale deployments use
 
 every other repo (installed by `vulgard rollout`)
 ├── .github/dependabot.yml          generated from detected ecosystems
@@ -187,6 +211,104 @@ exceptions:
     expires: 2027-03-31
 ```
 
+## Stale deployments
+
+With `deployments.enabled`, `nag` also tracks deployments in AWS (Serverless Framework v3 and
+CDK stacks in CloudFormation, SST v3/v4 state, Amplify branches) and Vercel, and repos nobody
+commits to. This section is the reference. For an explanation from scratch, read
+[How stale deployments work](docs/stale-deployments.md). To turn it on step by step, follow
+[Set up stale deployments](docs/guides/set-up-stale-deployments.md).
+[The design doc](docs/design/stale-deployments.md) has the rationale.
+
+- A deployment not deployed in `stale_days` (30), or a repo with no human commits in
+  `repo_inactive_days` (90), needs a baseline within `baseline_days` (14). The clocks come from
+  AWS, Vercel and GitHub timestamps, so editing the issue can't reset them.
+- Each such repo gets one issue labeled `vulgard-stale`, with the same reminders, escalation,
+  Slack digests, DMs (including the person a personal stack belongs to), Linear issue, and
+  leaderboard section as alerts. Severity comes from the tier: production high, shared medium,
+  personal low.
+- Record a baseline by commenting on that issue:
+
+  ```text
+  /vulgard redeploy <name>                       bring it up to date
+  /vulgard delete <name>                         delete it (never production)
+  /vulgard keep <name> until 2027-01-31: why     leave it as it is until then
+  /vulgard active until 2027-01-31: why          the repo is maintained without commits
+  /vulgard cancel <name>                         cancel an earlier command
+  ```
+
+  Only people with write access can baseline. vulgard re-reads the thread every run. The latest
+  command wins, and an expired keep brings the finding back. Deploying, deleting or committing
+  by hand also counts.
+- `nag --apply --execute` carries out `redeploy` and `delete` requests, and comments on the
+  issue when one starts and once when it ends. Each op has a fixed request id, so it runs once
+  however often `nag` does. A failed op isn't retried: post the command again to get a new
+  request id. A successful redeploy counts as a deploy even when CloudFormation had nothing to
+  update.
+
+  | Framework | Redeploy | Delete |
+  |---|---|---|
+  | Serverless v3 (OSLS), CDK | the repo's lifecycle workflow | CloudFormation `DeleteStack` (Serverless bucket emptied first) |
+  | SST v3/v4 | lifecycle workflow (`sst deploy`) | lifecycle workflow (`sst remove`) |
+  | Amplify Hosting | `StartJob` (release) | `DeleteBranch` |
+  | Amplify sandbox | not supported (it runs from a laptop) | CloudFormation `DeleteStack` |
+  | Vercel | rebuild of the production deployment | `DELETE project` (on request only) |
+
+  `vulgard rollout --lifecycle` opens a PR adding `vulgard-lifecycle.yml` to each repo with a
+  Serverless, SST or CDK app. Repos with their own deploy workflow can list it in
+  `deployments.workflows` instead; vulgard dispatches it with `action`, `framework`, `app`,
+  `stage`, `stack` and `request_id` inputs, and finds the run by the request id in its run name.
+- Automatic ops apply only to personal deployments in repos listed in `deployments.auto.repos`.
+  A deployment is personal when its stage, or an Amplify sandbox's user, is listed in
+  `deployments.people`. A personal deployment that hasn't
+  deployed in `auto.personal_stale_days` (90), or whose repo has open critical alerts, gets a
+  notice on the issue mentioning its owner. After `auto.notice_days` (7), the next
+  `--execute` run redeploys it, or deletes it with `auto.delete: true`.
+  `/vulgard keep` or `/vulgard cancel` stops it. The 7 days count from vulgard's own notice
+  comment, so editing the issue body can't shorten them, and a notice older than the stack's
+  last deploy or last keep no longer counts.
+- vulgard never deletes production or protected deployments. Those are a production stage or
+  tag, CloudFormation termination protection, an Amplify production branch (or one named `main`
+  or `master`), and a Vercel project with a custom domain. Before every delete it re-reads the
+  live target and skips it if someone redeployed, protected or reclassified it since.
+
+- Deployments with no known repo land in `unattributed_repo`. Tag stacks with `vulgard:repo`,
+  or map them in `deployments.attribution`.
+- `vulgard report --topic stale` lists every stale deployment and inactive repo and writes
+  nothing. To trial the topic org-wide, set `deployments.report_only: true`. `nag` then opens no
+  issues, Linear issues or Slack messages. Run without `--redact`, it writes the findings to the
+  workflow summary. The scheduled job redacts its output, so it only logs how many repos would
+  get an issue. Use `report --topic stale` for the list.
+
+### AWS roles for stale deployments
+
+The `nag` job assumes `VULGARD_AWS_ROLE` (repo variable) through GitHub OIDC. The CDK app in
+`infra/` creates both roles below: `cd infra && npm ci && npx cdk deploy -c githubOrg=<org>`. It
+starts read-only, and `-c writes=true` adds the write permissions. See
+[Set up stale deployments](docs/guides/set-up-stale-deployments.md#step-1-create-the-aws-roles)
+for the options.
+
+- `VulgardLifecycle`, trusted by the vulgard repo's workflows:
+  - Reads: `cloudformation:DescribeStacks`, `DescribeStackEvents`; `ssm:GetParameter` on
+    `/sst/bootstrap`; `s3:ListBucket` and `s3:GetObject` on the SST state bucket;
+    `amplify:ListApps`, `ListBranches`, `ListJobs`, `GetApp`, `GetBranch`.
+  - Writes: `cloudformation:DeleteStack`; `iam:PassRole` on `VulgardStackDelete` only;
+    `s3:ListBucketVersions`, `s3:DeleteObject` and `s3:DeleteObjectVersion` on
+    `arn:aws:s3:::*-serverlessdeploymentbucket-*`; `amplify:StartJob`, `amplify:DeleteBranch`.
+- `VulgardStackDelete`, trusted by `cloudformation.amazonaws.com` and set as
+  `deployments.aws.delete_role_arn`. CloudFormation deletes a stack's resources with this role,
+  so `VulgardLifecycle` itself never needs permission to delete Lambdas, tables or roles.
+
+Redeploys and SST removes run in the target repo with its own deploy role
+(`deployments.aws.deploy_role_arn`, e.g. `GithubCI`). The vulgard GitHub App needs
+the Actions write permission to dispatch them. Set the `VULGARD_EXECUTE` variable to `true` to add
+`--execute` to the scheduled run.
+
+Two gates keep a manual run from bypassing the issue thread. Running the `nag` workflow by hand
+with `execute` checked needs repo admin. The per-repo `vulgard-lifecycle.yml` accepts a dispatch
+only from an app (such as vulgard's) or a repo admin, and refuses to delete a stage with a
+production word (`prod`, `prd`, `production`, `live`, in any case) in its name.
+
 ## Caveats
 
 - **The `github` engine** (GitHub's dependency-review action) needs the dependency graph,
@@ -202,17 +324,43 @@ exceptions:
 
 ## Development
 
+CI (`.github/workflows/ci.yml`) runs on every PR in two jobs:
+
+- `test` runs `ruff check`, `pytest`, and dry runs of `report` and `nag` against the demo org.
+- `types` runs `mypy`.
+- `infra` type-checks and synthesizes the CDK app in `infra/`.
+
+The same commands work locally:
+
 ```bash
+uv run ruff check .
 uv run pytest
-uv run ruff check . && uv run ruff format --check .
+uv run mypy
 ```
 
-For a suggested reading order, see [Reading the code](docs/how-it-works.md#reading-the-code).
-Code lives in `src/vulgard/`: `policy.py` (SLA evaluation, exceptions, escalation rules,
-weekly fixed and dismissed summary), `plan.py` (per-repo decisions and the state stored in the
-tracking issue), `render.py` (issue, comment, and summary markdown), `nag.py` (tracking issues
-and comments), `linear.py` (Linear client and sync), `slack.py` (routed messages, DMs, leaderboard),
-`kev.py` (CISA KEV feed), `clients.py` (live API clients), `rollout.py`
-(Dependabot config and workflow generation), `enforce.py` (org rulesets), `github.py` (REST
-client), and `fixtures.py` (offline fakes for GitHub, Linear, and Slack used by the demo and
-tests).
+For a suggested reading order, see [Reading the code](docs/how-it-works.md#reading-the-code)
+and, for the stale path, [its counterpart](docs/stale-deployments.md#reading-the-code). Code
+lives in `src/vulgard/`.
+
+| Module | What it holds |
+|---|---|
+| `cli.py` | Command-line parsing and the four commands |
+| `topics.py` | One `nag` runner per topic: `run_vulns` and `run_stale` |
+| `plan.py` | Plan types shared by every topic, and the state stored in tracking issues |
+| `nag.py` | The engine: writes tracking issues and comments, and syncs Linear, for every topic |
+| `vulns.py` | Vulnerabilities topic: collecting alerts, `plan_repo`, the leaderboard |
+| `policy.py` | SLA evaluation, exceptions, escalation rules, the weekly fixed and dismissed summary |
+| `render.py` | Issue, comment, and summary markdown for vulnerabilities |
+| `stale.py`, `stale_plan.py`, `stale_render.py` | Stale topic: findings and SLAs, the per-repo plan, and its markdown |
+| `estate.py` | Deployment types, `classify` (repo, tier, person), and `discover` |
+| `aws.py`, `vercel.py` | Deployment scanners and native operations |
+| `baseline.py` | Parsing `/vulgard` commands and folding a comment thread into decisions |
+| `lifecycle.py` | Which redeploys and deletes to run, notices, and the safety checks |
+| `execute.py`, `executor.py` | Running one op idempotently, and the live GitHub, AWS and Vercel executor |
+| `repos.py` | Repo selection, owners, the framework index, and commit activity |
+| `linear.py`, `slack.py` | Linear sync; Slack routing, DMs, and the leaderboard |
+| `kev.py` | The CISA KEV feed |
+| `rollout.py`, `enforce.py` | Generated Dependabot config and workflows; org rulesets |
+| `github.py`, `clients.py` | The GitHub REST and GraphQL client; building the live clients |
+| `config.py` | Loading `vulgard.yml`, rejecting unknown keys |
+| `fixtures.py` | Offline fakes for GitHub, Linear and Slack, plus a fake deployment scanner and executor, used by the demo and tests |
