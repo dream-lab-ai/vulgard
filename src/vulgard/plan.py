@@ -34,6 +34,7 @@ class TopicSpec:
     topic: Topic
     label: str
     title: str  # GitHub issue title; the Linear title is f"{repo}: {title}"
+    slack_title: str  # plain-text header block on this topic's Slack messages
     slack_header: str  # channel digest header
     slack_dm_header: str
     escalation_header: str  # after the escalation mentions, in slack.escalation_channel

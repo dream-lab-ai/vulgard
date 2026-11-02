@@ -44,7 +44,16 @@ from .render import (
     severity_summary,
 )
 from .repos import resolve_owners, selected_repos
-from .slack import MAX_ROWS, ranking
+from .slack import (
+    DIVIDER,
+    LEADERBOARD_ROWS,
+    Block,
+    context_block,
+    fields_block,
+    header_block,
+    ranking,
+    section_block,
+)
 
 RESOLVED = "✅ All Dependabot alerts are resolved. Thanks! Closing this issue."
 
@@ -75,9 +84,10 @@ def spec(config: Config) -> TopicSpec:
         topic=Topic.VULNS,
         label=config.issue.label,
         title=config.issue.title,
+        slack_title="Vulnerable dependencies",
         slack_header="Vulnerable dependencies need attention in these repos:",
         slack_dm_header="Updates on vulnerable dependencies in repos you own:",
-        escalation_header="🚨 Escalation: these alerts are well past their fix deadline.",
+        escalation_header="These Dependabot alerts are well past their fix deadline:",
         linear_closed="✅ All Dependabot alerts are resolved. Closing.",
         memory_type=VulnMemory,
     )
@@ -298,8 +308,9 @@ def nag(
 
 def leaderboard_blocks(
     config: Config, reports: dict[str, RepoReport], closed: ClosedSummary | None
-) -> list[str]:
-    """The weekly org-wide scoreboard as Slack mrkdwn blocks. Names teams without pinging."""
+) -> list[Block]:
+    """The weekly org-wide scoreboard: totals, team rankings and only the riskiest few repos.
+    Names teams without pinging."""
     org = config.org
     ranked = sorted(
         (
@@ -312,33 +323,39 @@ def leaderboard_blocks(
     totals = org_totals(reports)
     fixed = closed.fixed if closed is not None else Counter()
     blocks = [
-        f"*🏆 Vulnerability leaderboard for {org}*: {sum(fixed.values())} fixed in the "
-        f"last 7 days, {totals.overdue} past deadline, {totals.exploited} actively exploited."
+        header_block(f"🏆 Vulnerability leaderboard · {org}"),
+        fields_block(
+            [
+                f"*Fixed (last 7 days)*\n{sum(fixed.values())}",
+                f"*Past deadline*\n{totals.overdue}",
+                f"*Actively exploited*\n{totals.exploited}",
+                f"*PRs ready to merge*\n{totals.ready_prs}",
+            ]
+        ),
     ]
 
     fixed_by_team: Counter[str] = Counter()
     for repo, n in fixed.items():
         fixed_by_team[team_of_owners(reports[repo].owners)] += n
-    if fixed_by_team:
-        rows = [f"{team}: {n}" for team, n in fixed_by_team.most_common()]
-        blocks.append(ranking("Most fixed this week", rows, medals=True))
-
     overdue_by_team: Counter[str] = Counter()
     exploited_by_team: Counter[str] = Counter()
     for r in reports.values():
         team = team_of_owners(r.owners)
         overdue_by_team[team] += len(r.overdue)
         exploited_by_team[team] += len(r.known_exploited)
-    rows = [
-        f"{team}: {n} overdue"
-        + (f" (🔥 {exploited_by_team[team]} exploited)" if exploited_by_team[team] else "")
-        for team, n in (+overdue_by_team).most_common()
-    ]
-    if rows:
-        blocks.append(ranking("Most overdue", rows, medals=False))
-
-    if totals.ready_prs:
-        blocks.append(f"*✅ {totals.ready_prs} Dependabot PR(s) pass CI and only need a merge.*")
+    rankings: list[str] = []
+    if fixed_by_team:
+        rows = [f"{team}: {n}" for team, n in fixed_by_team.most_common()]
+        rankings.append(ranking("Most fixed this week", rows, medals=True))
+    if len(+overdue_by_team) > 1:
+        rows = [
+            f"{team}: {n}"
+            + (f" (🔥 {exploited_by_team[team]})" if exploited_by_team[team] else "")
+            for team, n in (+overdue_by_team).most_common()
+        ]
+        rankings.append(ranking("Most overdue", rows, medals=False))
+    if rankings:
+        blocks.append(fields_block(rankings))
 
     if closed is not None and closed.unexplained:
         rows = [
@@ -346,22 +363,35 @@ def leaderboard_blocks(
             f"_{d.reason}_ by @{d.by} with no comment"
             for d in closed.unexplained[:10]
         ]
-        title = "⚠️ *High-severity dismissals with no justification:*"
-        blocks.append(title + "\n" + "\n".join(rows))
+        title = "⚠️ *High-severity dismissals with no justification*"
+        blocks.append(section_block(title + "\n" + "\n".join(rows)))
 
-    rows = [
-        f"• <https://github.com/{org}/{r.repo}/security/dependabot|{r.repo}>: "
-        f"{len(r.overdue)} overdue, {len(r.stale_prs)} stale PR(s)"
-        + (f", ✅ {len(r.ready_prs)} ready" if r.ready_prs else "")
-        + (f", 🔥 {len(r.known_exploited)} exploited" if r.known_exploited else "")
-        + (f" (owners: {', '.join(r.owners)})" if r.owners else "")
-        for r in ranked[:MAX_ROWS]
-    ]
-    if len(ranked) > MAX_ROWS:
-        rows.append(f"…and {len(ranked) - MAX_ROWS} more.")
-    if rows:
-        blocks.append("*Repos needing attention*\n" + "\n".join(rows))
-    else:
-        blocks.append("Nothing overdue. 🎉")
+    if not ranked:
+        blocks.append(section_block("Nothing overdue. 🎉"))
+        return blocks
+    shown = ranked[:LEADERBOARD_ROWS]
+    owners = {tuple(r.owners) for r in shown}
+    shared = owners.pop() if len(owners) == 1 else ()
+    rows = []
+    for r in shown:
+        parts = [f"{len(r.overdue)} overdue"] if r.overdue else []
+        if r.stale_prs:
+            parts.append(f"{len(r.stale_prs)} stale PR{'s' if len(r.stale_prs) != 1 else ''}")
+        if r.ready_prs:
+            parts.append(f"✅ {len(r.ready_prs)} ready")
+        if r.known_exploited:
+            parts.append(f"🔥 {len(r.known_exploited)} exploited")
+        if r.owners and not shared:
+            parts.append(", ".join(r.owners))
+        link = f"<https://github.com/{org}/{r.repo}/security/dependabot|{r.repo}>"
+        rows.append(f"• *{link}* — {' · '.join(parts)}")
+    blocks += [DIVIDER, section_block("*Highest-risk repos*\n" + "\n".join(rows))]
+    hidden = len(ranked) - len(shown)
+    notes = [f"+{hidden} more repos need attention"] if hidden else []
+    if shared:
+        notes.append(f"Owners: {', '.join(shared)}")
+    alerts_url = f"https://github.com/orgs/{org}/security/alerts/dependabot"
+    notes.append(f"<{alerts_url}|All Dependabot alerts>")
+    blocks.append(context_block(notes))
     return blocks
 

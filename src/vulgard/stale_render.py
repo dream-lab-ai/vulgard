@@ -14,7 +14,7 @@ from .lifecycle import PAST, RUN_FAILED, RUNNING_NOW, Op, Trigger
 from .plan import RepoRun, TrackingState
 from .policy import SlaStatus
 from .render import SEVERITY_ICON, format_table
-from .slack import ranking
+from .slack import Block, fields_block, header_block, ranking
 from .stale import (
     DeploymentFinding,
     Finding,
@@ -267,8 +267,8 @@ def render_summary(reports: Mapping[str, StaleReport]) -> str:
 
 def leaderboard_blocks(
     reports: Mapping[str, StaleReport], runs: list[RepoRun], now: datetime
-) -> list[str]:
-    """Most baselined this week (medals) and most overdue baselines, by team."""
+) -> list[Block]:
+    """Totals, then most baselined this week (medals) and most overdue baselines, by team."""
     week = (now - timedelta(days=7)).date().isoformat()
     baselined: Counter[str] = Counter()
     for run in runs:
@@ -283,15 +283,23 @@ def leaderboard_blocks(
         overdue[team] += len(r.overdue)
         stale[team] += len(r.findings)
     blocks = [
-        f"*Stale deployments: {sum(stale.values())} need a baseline, "
-        f"{sum(overdue.values())} overdue*"
+        header_block("🧹 Stale deployments"),
+        fields_block(
+            [
+                f"*Need a baseline*\n{sum(stale.values())}",
+                f"*Overdue*\n{sum(overdue.values())}",
+            ]
+        ),
     ]
+    rankings: list[str] = []
     if +baselined:
         rows = [f"{team}: {n}" for team, n in (+baselined).most_common()]
-        blocks.append(ranking("Most baselined this week", rows, medals=True))
-    if +overdue:
-        rows = [f"{team}: {n} overdue" for team, n in (+overdue).most_common()]
-        blocks.append(ranking("Most overdue baselines", rows, medals=False))
+        rankings.append(ranking("Most baselined this week", rows, medals=True))
+    if len(+overdue) > 1:
+        rows = [f"{team}: {n}" for team, n in (+overdue).most_common()]
+        rankings.append(ranking("Most overdue baselines", rows, medals=False))
+    if rankings:
+        blocks.append(fields_block(rankings))
     return blocks
 
 

@@ -29,6 +29,7 @@ from .plan import Action, ActionKind, RepoRun, Topic, TrackingState
 from .policy import RepoReport, summarize_closed
 from .render import render_org_summary
 from .repos import resolve_owners, selected_repos
+from .slack import Block
 from .stale import StaleMemory, StaleReport, evaluate, spec, survey
 from .stale_plan import plan_repo
 from .vulns import collect, critical_repos, leaderboard_blocks, nag
@@ -69,7 +70,7 @@ class TopicResult:
     runs: list[RepoRun] = field(default_factory=list)
     actions: list[Action] = field(default_factory=list)  # beyond what the runs carry
     summary: str | None = None  # markdown for the workflow step summary
-    leaderboard: list[str] = field(default_factory=list)  # Slack mrkdwn blocks
+    leaderboard: list[Block] = field(default_factory=list)  # Slack Block Kit blocks
     repos: set[str] = field(default_factory=set)
     failed: bool = False
 
@@ -80,7 +81,7 @@ def run_vulns(ctx: NagContext) -> TopicResult:
     runs = nag(gh, config, reports, apply=ctx.apply, now=ctx.now, linear=ctx.linear)
     since = ctx.now - timedelta(days=7)
     closed = summarize_closed(gh.list_closed_alerts(config.org, since), set(reports), since)
-    blocks: list[str] = []
+    blocks: list[Block] = []
     if ctx.leaderboard:
         for repo in closed.fixed:
             if not reports[repo].owners:
@@ -191,7 +192,7 @@ def run_stale(ctx: NagContext) -> TopicResult:
     if cfg.report_only:
         n = sum(1 for r in reports.values() if r.findings)
         print(f"Stale deployments are report-only: {n} repo(s) would get a tracking issue.")
-    blocks: list[str] = []
+    blocks: list[Block] = []
     if ctx.leaderboard and not cfg.report_only:
         blocks = stale_render.leaderboard_blocks(reports, runs, ctx.now)
     return TopicResult(

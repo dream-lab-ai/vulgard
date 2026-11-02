@@ -274,9 +274,11 @@ class FixtureScanner:
 class FakeSlack:
     def __init__(self) -> None:
         self.messages: list[tuple[str, str]] = []
+        self.blocks: list[list[dict[str, Any]]] = []
 
     def post(self, channel: str, text: str, blocks: list[dict[str, Any]] | None = None) -> None:
         self.messages.append((channel, text))
+        self.blocks.append(blocks or [])
 
 
 class FixtureExecutor:
