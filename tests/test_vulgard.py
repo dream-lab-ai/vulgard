@@ -325,6 +325,8 @@ def test_linear_issue_lifecycle():
     assert "projectId" not in pipeline and "stateId" not in pipeline
     assert pipeline["priority"] == 2 and "dueDate" in pipeline
     assert created["web-storefront"][1]["assigneeId"] == "user:jlee@acme.com"
+    assert pipeline["assigneeId"] == "user:sam@acme.com"
+    assert "assigneeId" not in payments
     # The Linear link is persisted in the GitHub issue so later runs find it.
     ref = vuln_state(gh.data["issues"]["payments-api"]["body"]).linear
     assert ref.identifier == created["payments-api"][0]
@@ -387,6 +389,8 @@ def test_linear_targets_merge_route_overrides_with_defaults():
         parse_config({"org": "acme", "linear": {"severity_labels": {"urgent": "P0"}}})
     with pytest.raises(ValueError, match="linear.labels"):
         parse_config({"org": "acme", "linear": {"label": "vulgard"}})
+    with pytest.raises(ValueError, match="no repo routes to INV"):
+        parse_config({"org": "acme", "linear": {"default_team": "SEC", "leads": {"INV": "a@b"}}})
 
 
 def test_linear_escalation_is_commented_when_the_issue_is_created():
