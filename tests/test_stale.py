@@ -378,10 +378,16 @@ def test_one_repos_github_failure_does_not_discard_the_others():
 
 def test_leaderboard_blocks_rank_teams_by_overdue_baselines():
     cfg = config()
-    report = replace(evaluate([dep(days=60)], cfg=cfg)["api"], owners=["@acme/api"])
-    blocks = stale_render.leaderboard_blocks({"api": report}, [], NOW)
-    assert "1 need a baseline, 1 overdue" in blocks[0]
-    assert "Most overdue baselines" in blocks[1] and "@acme/api: 1 overdue" in blocks[1]
+    report = evaluate([dep(days=60)], cfg=cfg)["api"]
+    reports = {
+        "api": replace(report, owners=["@acme/api"]),
+        "web": replace(report, repo="web", owners=["@acme/web"]),
+    }
+    blocks = stale_render.leaderboard_blocks(reports, [], NOW)
+    assert blocks[0]["type"] == "header"
+    assert [f["text"] for f in blocks[1]["fields"]] == ["*Need a baseline*\n2", "*Overdue*\n2"]
+    ranking = blocks[2]["fields"][0]["text"]
+    assert "Most overdue baselines" in ranking and "@acme/api: 1" in ranking
 
 
 # --- CLI

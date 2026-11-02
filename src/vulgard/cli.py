@@ -138,9 +138,8 @@ def cmd_nag(clients: Clients, config: Config, args: argparse.Namespace) -> int:
             )
         else:
             actions += notify_slack(clients.slack, config, runs, args.apply)
-        blocks = [block for res in results for block in res.leaderboard]
-        if blocks:
-            text, payload = leaderboard_message(blocks)
+        if any(res.leaderboard for res in results):
+            text, payload = leaderboard_message([res.leaderboard for res in results])
             actions.append(
                 send_leaderboard(
                     clients.slack, clients.slack_webhook, config, text, payload, args.apply

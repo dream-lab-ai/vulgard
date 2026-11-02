@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -427,7 +428,11 @@ def test_slack_routes_to_team_channels_dms_and_escalation():
     runs = nag(gh, config, collect(gh, config, kev=kev), apply=False)
     slack = FakeSlack()
     notify_slack(slack, config, runs, apply=True)
-    by_target = {target: text for target, text in slack.messages}
+    by_target = {
+        target: json.dumps(blocks, ensure_ascii=False)
+        for (target, _), blocks in zip(slack.messages, slack.blocks, strict=True)
+    }
+    assert all(blocks[0]["type"] == "header" for blocks in slack.blocks)
 
     assert "payments-api" in by_target["#payments-eng"]  # owner -> channel
     assert "1 Dependabot PR(s) ready to merge" in by_target["#payments-eng"]
@@ -435,8 +440,9 @@ def test_slack_routes_to_team_channels_dms_and_escalation():
     assert "data-pipeline" in by_target["#eng-alerts"]  # default channel
     assert "<@U012JLEE>" in by_target["#frontend"]  # GitHub handle -> Slack mention
     assert "web-storefront" in by_target["U012JLEE"]  # DM to the individual owner
-    escalation = by_target["#security-escalations"]
-    assert escalation.startswith("<!subteam^S01SECURITY>") and "payments-api" in escalation
+    assert "payments-api" in by_target["#security-escalations"]
+    texts = dict(slack.messages)
+    assert texts["#security-escalations"].startswith("<!subteam^S01SECURITY>")
 
 
 def test_weekly_summary_flags_unexplained_dismissals():
@@ -448,11 +454,34 @@ def test_weekly_summary_flags_unexplained_dismissals():
     assert [(d.repo, d.by) for d in closed.unexplained] == [("data-pipeline", "mchen")]
 
     config = example_config()
-    text, blocks = leaderboard_message(leaderboard_blocks(config, collect(gh, config), closed))
+    reports = collect(gh, config)
+    text, blocks = leaderboard_message([leaderboard_blocks(config, reports, closed), []])
     rendered = json.dumps(blocks, ensure_ascii=False)
-    assert "1 fixed" in rendered and "no justification" in rendered and "mchen" in rendered
+    assert blocks[0]["type"] == "header" and text.startswith("🏆 Vulnerability leaderboard")
+    assert "*Fixed (last 7 days)*\\n1" in rendered
+    assert "no justification" in rendered and "mchen" in rendered
     assert "Most fixed this week" in rendered and "🥇 @acme/payments: 1" in rendered
-    assert "Most overdue" in rendered and "<@" not in text  # names teams without pinging
+    assert "Most overdue" in rendered and "<@" not in rendered  # names teams without pinging
+    assert "Highest-risk repos" in rendered
+
+
+def test_leaderboard_lists_only_the_riskiest_repos():
+    config = example_config()
+    gh = FixtureGitHub.from_file(EXAMPLES / "demo-org.json")
+    report = next(r for r in collect(gh, config).values() if r.overdue)
+    reports = {f"repo-{i}": replace(report, repo=f"repo-{i}", owners=["@acme/a"]) for i in range(8)}
+    blocks = leaderboard_blocks(config, reports, None)
+    rendered = json.dumps(blocks, ensure_ascii=False)
+    assert rendered.count("security/dependabot|repo-") == 5
+    assert "+3 more repos need attention" in rendered and "Owners: @acme/a" in rendered
+    assert "Most overdue" not in rendered  # one team: the totals already say it
+
+
+def test_leaderboard_message_divides_topics():
+    a = [{"type": "header", "text": {"type": "plain_text", "text": "A"}}]
+    b = [{"type": "header", "text": {"type": "plain_text", "text": "B"}}]
+    text, blocks = leaderboard_message([a, [], b])
+    assert text == "A · B" and [x["type"] for x in blocks] == ["header", "divider", "header"]
 
 
 def test_leaderboard_goes_to_the_org_default_channel():

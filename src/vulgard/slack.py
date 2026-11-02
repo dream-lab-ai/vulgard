@@ -13,9 +13,11 @@ from .config import Config, route
 from .plan import Action, ActionKind, IssueOp, RepoRun, TopicSpec
 
 API_URL = "https://slack.com/api"
-MAX_ROWS = 15
 LEADERBOARD_ROWS = 5
 MEDALS = ("🥇", "🥈", "🥉")
+SECTION_CHARS = 3000
+
+type Block = dict[str, Any]
 
 
 class SlackError(RuntimeError):
@@ -133,28 +135,77 @@ def notify_slack(
                 if user and line not in msgs.dms[user]:
                     msgs.dms[user].append(line)
 
-    messages: list[tuple[str, str, list[str]]] = []
+    messages: list[tuple[str, str, str, list[str]]] = []
     for msgs in topics.values():
         spec = msgs.spec
-        messages += [(ch, spec.slack_header, lines) for ch, lines in msgs.channels.items()]
+        messages += [
+            (ch, spec.slack_title, spec.slack_header, lines) for ch, lines in msgs.channels.items()
+        ]
         if msgs.escalations and config.slack.escalation_channel:
             leads = "".join(f"{config.slack.mention(m)} " for m in config.escalation.mentions)
-            header = leads + spec.escalation_header
-            messages.append((config.slack.escalation_channel, header, msgs.escalations))
-        messages += [(user, spec.slack_dm_header, lines) for user, lines in msgs.dms.items()]
+            messages.append(
+                (
+                    config.slack.escalation_channel,
+                    f"🚨 Escalation · {spec.slack_title}",
+                    leads + spec.escalation_header,
+                    msgs.escalations,
+                )
+            )
+        messages += [
+            (user, f"{spec.slack_title} · your repos", spec.slack_dm_header, lines)
+            for user, lines in msgs.dms.items()
+        ]
     return [
         _post(
             target,
             f"{len(lines)} repo(s)",
-            partial(client.post, target, header + "\n" + "\n".join(lines)),
+            partial(client.post, target, *digest_message(title, intro, lines)),
             apply,
         )
-        for target, header, lines in messages
+        for target, title, intro, lines in messages
     ]
 
 
-def _section(text: str) -> dict[str, Any]:
-    return {"type": "section", "text": {"type": "mrkdwn", "text": text[:3000]}}
+def header_block(text: str) -> Block:
+    return {"type": "header", "text": {"type": "plain_text", "text": text[:150], "emoji": True}}
+
+
+def section_block(text: str) -> Block:
+    return {"type": "section", "text": {"type": "mrkdwn", "text": text[:SECTION_CHARS]}}
+
+
+def fields_block(texts: list[str]) -> Block:
+    """Up to 10 mrkdwn cells laid out two per row."""
+    return {
+        "type": "section",
+        "fields": [{"type": "mrkdwn", "text": t[:2000]} for t in texts[:10]],
+    }
+
+
+def context_block(parts: list[str]) -> Block:
+    return {"type": "context", "elements": [{"type": "mrkdwn", "text": p} for p in parts[:10]]}
+
+
+DIVIDER: Block = {"type": "divider"}
+
+
+def chunk_lines(lines: list[str], limit: int = SECTION_CHARS) -> list[str]:
+    """Joins lines into as few texts as fit one section each."""
+    chunks: list[str] = []
+    for line in lines:
+        if chunks and len(chunks[-1]) + 1 + len(line) <= limit:
+            chunks[-1] += "\n" + line
+        else:
+            chunks.append(line)
+    return chunks
+
+
+def digest_message(title: str, intro: str, lines: list[str]) -> tuple[str, list[Block]]:
+    """A header, the intro (which may carry mentions) and one bullet per repo. The fallback text
+    is what notifications show, so it leads with the intro."""
+    blocks = [header_block(title), section_block(intro)]
+    blocks += [section_block(chunk) for chunk in chunk_lines(lines)]
+    return f"{intro} ({len(lines)} repo(s))", blocks
 
 
 def ranking(title: str, rows: list[str], medals: bool) -> str:
@@ -165,11 +216,14 @@ def ranking(title: str, rows: list[str], medals: bool) -> str:
     return f"*{title}*\n" + "\n".join(lines)
 
 
-def leaderboard_message(blocks: list[str]) -> tuple[str, list[dict[str, Any]]]:
-    """The weekly org-wide scoreboard for `slack.default_channel`, from the mrkdwn blocks each
-    topic produced."""
-    sections = [_section(b) for b in blocks]
-    return "\n\n".join(b["text"]["text"] for b in sections), sections
+def leaderboard_message(topics: list[list[Block]]) -> tuple[str, list[Block]]:
+    """The weekly org-wide scoreboard for `slack.default_channel`: each topic's blocks, divided.
+    The fallback text is just the topic headers, so it never pings anyone."""
+    blocks: list[Block] = []
+    for topic in (t for t in topics if t):
+        blocks += [DIVIDER, *topic] if blocks else topic
+    titles = [b["text"]["text"] for b in blocks if b["type"] == "header"]
+    return " · ".join(titles), blocks
 
 
 def send_leaderboard(
@@ -177,7 +231,7 @@ def send_leaderboard(
     webhook_url: str | None,
     config: Config,
     text: str,
-    blocks: list[dict[str, Any]],
+    blocks: list[Block],
     apply: bool,
 ) -> Action:
     channel = config.slack.default_channel
