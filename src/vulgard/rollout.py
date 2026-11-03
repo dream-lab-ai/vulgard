@@ -84,11 +84,15 @@ def render_dependabot_config(ecosystems: dict[str, list[str]], interval: str) ->
                 "applies-to": "version-updates",
                 "update-types": ["minor", "patch"],
             },
+            "major": {
+                "applies-to": "version-updates",
+                "update-types": ["major"],
+            },
         }
         updates.append(entry)
     header = (
-        "# Managed by vulgard. Minor and patch updates are grouped into one PR per\n"
-        "# ecosystem, so there are fewer to review.\n"
+        "# Managed by vulgard. Security, minor/patch, and major updates each become one\n"
+        "# grouped PR per ecosystem, instead of one PR per package.\n"
     )
     return header + yaml.safe_dump({"version": 2, "updates": updates}, sort_keys=False)
 
@@ -143,7 +147,7 @@ It adds or updates:
 **What changes for you**
 - PRs that add a dependency with a known **{severity}**-or-worse vulnerability fail the \
 `vulgard / guard / scan` check.
-- Dependabot opens **one grouped PR per ecosystem** for minor and patch updates, instead of \
+- Dependabot opens **grouped PRs per ecosystem** (security, minor/patch, and major), instead of \
 one PR per package.
 {automerge}
 Please merge this PR. If something doesn't fit this repo, comment here instead of closing it.
@@ -291,12 +295,20 @@ def plan_rollout(gh: Any, config: Config, repo: dict[str, Any]) -> RolloutPlan:
     plan.existing_pr = existing["html_url"] if existing else None
     ref = config.rollout.branch if existing else default
 
-    if gh.get_file(config.org, name, DEPENDABOT_PATH, ref) is None:
-        ecosystems = detect_ecosystems(paths)
-        if ecosystems:
-            plan.files[DEPENDABOT_PATH] = render_dependabot_config(
-                ecosystems, config.rollout.schedule_interval
-            )
+    ecosystems = detect_ecosystems(paths)
+    desired_dependabot = None
+    if ecosystems:
+        desired_dependabot = render_dependabot_config(
+            ecosystems, config.rollout.schedule_interval
+        )
+    current_dependabot = gh.get_file(config.org, name, DEPENDABOT_PATH, ref)
+    if desired_dependabot and (
+        current_dependabot is None
+        or (
+            current_dependabot.startswith(MANAGED_MARK) and current_dependabot != desired_dependabot
+        )
+    ):
+        plan.files[DEPENDABOT_PATH] = desired_dependabot
     current = gh.get_file(config.org, name, WORKFLOW_PATH, ref)
     desired = render_caller_workflow(config, name)
     if current != desired and (current is None or current.startswith(MANAGED_MARK)):

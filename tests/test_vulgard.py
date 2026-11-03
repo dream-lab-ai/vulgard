@@ -553,6 +553,7 @@ def test_dependabot_config_groups_updates():
     npm, pip = cfg["updates"]
     assert npm["directories"] == ["/", "/web"] and pip["directory"] == "/"
     assert npm["groups"]["minor-and-patch"]["update-types"] == ["minor", "patch"]
+    assert npm["groups"]["major"]["update-types"] == ["major"]
     assert npm["groups"]["security"]["applies-to"] == "security-updates"
 
 
@@ -569,6 +570,19 @@ def test_caller_workflow_is_valid_yaml_and_auto_merge_is_opt_in(config):
 def test_auto_merge_rejects_the_old_boolean_form():
     with pytest.raises(ValueError, match="list of repos"):
         parse_config({"org": "acme", "rollout": {"auto_merge": True}})
+
+
+def test_rollout_refreshes_managed_dependabot_config():
+    config = example_config()
+    gh = FixtureGitHub.from_file(EXAMPLES / "demo-org.json")
+    repos = {r["name"]: r for r in gh.list_repos("acme")}
+    files = gh.data["files"]["payments-api"]
+    files[DEPENDABOT_PATH] = "# Managed by vulgard. outdated\nversion: 2\nupdates: []\n"
+    plan = plan_rollout(gh, config, repos["payments-api"])
+    assert DEPENDABOT_PATH in plan.files
+    assert "major:" in plan.files[DEPENDABOT_PATH]
+    files.update(plan.files)
+    assert plan_rollout(gh, config, repos["payments-api"]).skipped_reason == "up to date"
 
 
 def test_rollout_refreshes_managed_workflow_but_not_hand_written_ones():
