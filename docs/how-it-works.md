@@ -106,7 +106,8 @@ vulnerabilities topic.
    means Go, a `Dockerfile` means Docker, and so on (see `MANIFESTS` in `rollout.py`). It
    ignores vendored folders like `node_modules/`.
 3. Generates `.github/dependabot.yml` for those ecosystems, unless the repo already has one.
-   The file tells Dependabot to group minor and patch updates into one PR per ecosystem.
+   The file tells Dependabot to group security, minor/patch, and major updates into a few
+   PRs per ecosystem instead of one PR per package.
 4. Generates `.github/workflows/vulgard.yml`, a short workflow that calls reusable
    workflows living in the vulgard repo:
    - `guard.yml` is the PR check that blocks vulnerable packages. Its job is `scan`, so on a

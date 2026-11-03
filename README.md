@@ -10,7 +10,7 @@ Turning on Dependabot isn't enough if nobody merges its PRs. vulgard covers the 
 | Everything looks equally urgent | Alerts whose CVE is on **CISA's Known Exploited Vulnerabilities** list get a 3-day deadline and escalate as soon as they're overdue. |
 | "Won't fix" decisions are invisible and permanent | **Exceptions in `vulgard.yml` need a reason and an expiry date.** Accepted risks stay listed in the tracking issue and come back when they expire. The leaderboard names anyone who dismissed a critical or high alert without a comment. |
 | Fixes go unnoticed | A **leaderboard** in the org-wide Slack channel ranks teams by alerts fixed in the last 7 days and by alerts past deadline. |
-| Dependabot PRs rot | Dependabot config that **groups minor and patch updates into one PR per ecosystem**. Repos that opt in also **auto-approve and auto-merge** them once CI passes. **A PR that passes CI but is still open after 2 days** pings its owners in GitHub, Slack, and Linear, listing the alerts it would fix. The tracking issue lists stale PRs. |
+| Dependabot PRs rot | Dependabot config that **groups security, minor/patch, and major updates into a few PRs per ecosystem** (not one PR per package). Repos that opt in also **auto-approve and auto-merge** minor and patch PRs once CI passes. **A PR that passes CI but is still open after 2 days** pings its owners in GitHub, Slack, and Linear, listing the alerts it would fix. The tracking issue lists stale PRs. |
 | New vulnerabilities get merged | A reusable **`vulgard / guard / scan`** check fails any PR that adds a dependency with a known vulnerability, and an **org ruleset** makes it required. |
 
 Everything that writes to GitHub runs as a **dry run by default**. Add `--apply` to make changes.
