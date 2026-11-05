@@ -345,7 +345,7 @@ def test_report_only_writes_nothing_but_the_summary(tmp_path, capsys):
     nag = ["nag", "--topic", "inspector", "--linear", "--slack", "--apply"]
     assert main([*args, *nag, "--summary-file", str(summary)]) == 0
     out = capsys.readouterr().out
-    assert "report-only: 2 repo(s) have fix items" in out
+    assert "report-only: 3 repo(s) have fix items" in out
     assert "0 action(s)" in out
     assert "| payments-api | GitHub, Linear | 3 |" in summary.read_text()
 
@@ -371,6 +371,6 @@ def test_redacted_output_names_no_repo_or_resource(capsys):
     nag = ["nag", "--topic", "inspector", "--linear", "--slack", "--redact"]
     assert main([*FIXTURE_ARGS, *nag]) == 0
     out = capsys.readouterr().out
-    assert "linear-create: 5" in out
+    assert "linear-create: 6" in out
     for name in ("payments-api", "inventory", "sst-asset", "orphan-handler", "axios", "lin-"):
         assert name not in out

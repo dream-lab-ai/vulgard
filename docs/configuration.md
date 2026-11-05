@@ -243,7 +243,7 @@ inspector:
 |---|---|---|---|
 | `enabled` | bool | `false` | `nag` tracks the findings. Without it, `nag` skips this topic and `nag --topic inspector` stops with an error. `report` works either way. |
 | `report_only` | bool | `false` | `nag` writes the job summary only: no issues, Linear issues or Slack messages. |
-| `regions` | list | `[us-east-1]` | Regions to read findings from. Credentials come from the environment, through GitHub OIDC in CI. The role needs `inspector2:ListFindings`, which the `VulgardLifecycle` role in `infra/` grants. |
+| `regions` | list | `[us-east-1]` | Regions to read findings from. Credentials come from the environment, through GitHub OIDC in CI. The role needs `inspector2:ListFindings`, and for images in shared repositories `ecs:ListTaskDefinitions` and `ecs:DescribeTaskDefinition`. The `VulgardLifecycle` role in `infra/` grants all of them. |
 | `min_severity` | `critical`, `high`, `medium` or `low` | `high` | The least severe findings to report. Anything more severe is included too. See below for why it defaults to `high`. |
 | `ignore` | list of globs | `[]` | Resources never reported. Each glob is matched against the resource name (a Lambda function name, an ECR repository name or an EC2 instance id) and against its CloudFormation stack name. |
 
@@ -260,7 +260,13 @@ There is no repo map to maintain for Inspector. vulgard tries these in order and
    - `amplify:app-id` and `amplify:branch-name`, which Amplify Gen2 adds.
    - For ECR images only, the repository name. ECR images have no tags, but Serverless names its repository `serverless-<service>-<stage>`, and the stack is `<service>-<stage>`.
 
-The JSON output records which rule was used for each finding (`via` is `tag` or `deployment`) and, for `deployment`, the deployment's name.
+3. **What runs the image.** This rule is only for images in a shared asset repository (see below). Those repositories are shared by every app in the account, so the repository name says nothing about whose image it is. Instead vulgard looks for the thing that runs the image, and applies rules 1 and 2 to that. The only runner it looks at is an **ECS task definition**, the recipe that tells Amazon ECS which containers to run. vulgard reads the latest active revision of each task definition family. A container image that a task definition names by **digest** (its content hash, like `sha256:ab12...`) is matched by digest. One it names by tag, which is how CDK and SST reference the images they push, is matched by the image's tag, because the tag is all the task definition holds. vulgard reads those tags from Inspector's finding. Lambda functions that run a shared image are not traced. Reading them needs `lambda:GetFunction`, which also returns every function's environment variables, and the vulgard role does not get that.
+
+   The task definition's tags then answer the same way a resource's tags do: a repo tag first, then the deployment its tags name. If no task definition that runs the image names a repo, the image stays `shared_asset_repository`. Task definitions that name no repo are ignored when another one does. If task definitions name two or more different repos, the image is left unattributed as `runners_in_several_repos`, rather than picking a repo, because the fix would go to a team that may not own it.
+
+The JSON output records which rule was used for each finding (`via` is `tag` or `deployment`) and, for `deployment`, the deployment's name. When rule 3 answered, `runner` has the `name` of the task definition (its family), and `via` says how that task definition got its repo. For any other finding `runner` is `null`.
+
+Rule 3 only runs when the report has an image in a shared asset repository. Per configured region it makes one `ListTaskDefinitions` call per 100 active revisions, and one `DescribeTaskDefinition` call per task definition family. Older revisions of a family are not read, so an image that only an older revision still runs is not found.
 
 ### Fix status
 
@@ -282,7 +288,8 @@ Findings with no repo (see below) have no repository to look in, so their items 
 
 These land in rows labelled `unattributed: <reason>`. Each reason says what to fix:
 
-- `shared_asset_repository`: the image is in `sst-asset` or a `cdk-*-container-assets-*` repository. Every app in the account shares these, so the repository name can't say whose image it is.
+- `shared_asset_repository`: the image is in `sst-asset` or a `cdk-*-container-assets-*` repository. Every app in the account shares these, so the repository name can't say whose image it is, and no ECS task definition that runs it names a repo (rule 3 above). Either no task definition in the scanned regions runs the image, or the ones that do have none of the tags above. Tag the task definition `vulgard:repo=<repo>`, or tag the stack that creates it.
+- `runners_in_several_repos`: the image is in a shared asset repository and the task definitions that run it belong to different repos. Check which repo should own the fix.
 - `no_deployment_tags`: the resource has none of the tags above, so there is nothing to look up. Tag the resource `vulgard:repo=<repo>`, or tag the stack that creates it, since CloudFormation copies stack tags onto the resources it creates.
 - `deployment_not_found`: the resource's tags name a deployment, but vulgard's scan didn't find one with that name. For example, the stack is nested inside another stack, or lives in a region outside `deployments.aws.regions`.
 - `deployment_unattributed`: vulgard found the deployment, but no repo is known for it either. Fix it the way you would for a stale deployment. Tag the stack with `github:repo` when it deploys, for example `Tags.of(app).add("github:repo", "<org>/<repo>")` in a CDK app. `deployments.attribution` also works, but it's a map someone has to keep up to date.
@@ -332,3 +339,4 @@ When every item of a repo clears, its GitHub issue and Linear sub-issue close. A
 | `inspector.min_severity must be one of` | Use `critical`, `high`, `medium` or `low`. |
 | `--topic inspector needs inspector.enabled in the config` | Set `inspector.enabled: true`, or leave out `--topic inspector`. |
 | `Inspector scan failed` | Inspector couldn't be read. The message has AWS's reason, for example missing `inspector2:ListFindings` permission or expired credentials. |
+| `Image runner scan failed` | The ECS task definitions couldn't be read. The message has AWS's reason, for example a missing `ecs:DescribeTaskDefinition` permission. Update the `VulgardLifecycle` role from `infra/vulgard-roles.yaml`. |

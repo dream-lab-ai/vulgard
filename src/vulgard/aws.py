@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import re
+import sys
 from collections.abc import Iterable
 from datetime import datetime
 from typing import Any, assert_never
@@ -25,7 +26,13 @@ from .estate import (
     Sighting,
     SstStage,
 )
-from .inspector import Finding, InspectorResource, ResourceType
+from .inspector import (
+    Finding,
+    ImageRunner,
+    InspectorResource,
+    ResourceType,
+    parse_image,
+)
 from .policy import parse_time
 
 SST_BOOTSTRAP = "/sst/bootstrap"
@@ -149,16 +156,22 @@ def _inspector_resource(raw: dict[str, Any]) -> InspectorResource | None:
     if kind is None:
         return None
     details = raw.get("details") or {}
+    digest: str | None = None
+    image_tags: tuple[str, ...] = ()
     match kind:
         case ResourceType.LAMBDA:
             name = details["awsLambdaFunction"]["functionName"]
         case ResourceType.ECR_IMAGE:
-            name = details["awsEcrContainerImage"]["repositoryName"]
+            image = details["awsEcrContainerImage"]
+            name = image["repositoryName"]
+            digest, image_tags = image.get("imageHash"), tuple(image.get("imageTags") or ())
         case ResourceType.EC2:
             name = raw["id"]
         case _ as unreachable:
             assert_never(unreachable)
-    return InspectorResource(kind, raw["id"], name, raw.get("region", ""), raw.get("tags") or {})
+    return InspectorResource(
+        kind, raw["id"], name, raw.get("region", ""), raw.get("tags") or {}, digest, image_tags
+    )
 
 
 def sight_finding(raw: dict[str, Any]) -> Finding | None:
@@ -191,6 +204,28 @@ def sight_finding(raw: dict[str, Any]) -> Finding | None:
         title=raw.get("title", ""),
         resource=resource,
     )
+
+
+def sight_task_definition_runners(response: dict[str, Any], region: str) -> list[ImageRunner]:
+    """One DescribeTaskDefinition response (with `include=["TAGS"]`) -> one runner per container
+    image in ECR."""
+    definition = response["taskDefinition"]
+    tags = {tag["key"]: tag["value"] for tag in response.get("tags") or []}
+    return [
+        ImageRunner(definition["family"], region, image, tags)
+        for container in definition.get("containerDefinitions") or []
+        if (image := parse_image(container.get("image", ""))) is not None
+    ]
+
+
+def latest_revisions(task_definition_arns: Iterable[str]) -> list[str]:
+    """The highest revision of each family, from `arn:...:task-definition/<family>:<revision>`."""
+    latest: dict[str, tuple[int, str]] = {}
+    for arn in task_definition_arns:
+        family, _, revision = arn.rpartition("/")[2].rpartition(":")
+        if family not in latest or int(revision) > latest[family][0]:
+            latest[family] = (int(revision), arn)
+    return [arn for _, arn in latest.values()]
 
 
 def sst_state_bucket(parameter_value: str) -> str | None:
@@ -261,6 +296,9 @@ class AwsScanner:
         return found
 
 
+ACCESS_DENIED = ("AccessDenied", "AccessDeniedException")
+
+
 class AwsInspector:
     """Active package-vulnerability findings from Amazon Inspector in every configured region.
     Severities below `min_severity` are filtered by Inspector itself: an account can hold tens of
@@ -302,6 +340,38 @@ class AwsInspector:
             for page in pages
             for raw in page["findings"]
             if (finding := sight_finding(raw))
+        ]
+
+    def runners(self) -> list[ImageRunner]:
+        """The ECS task definitions running container images. Call counts per region: one
+        ListTaskDefinitions page per 100 ACTIVE revisions and one DescribeTaskDefinition per task
+        definition family (its latest ACTIVE revision only)."""
+        found: list[ImageRunner] = []
+        for region in self._regions:
+            try:
+                found += self._ecs_runners(region)
+            except ClientError as e:
+                if e.response.get("Error", {}).get("Code") not in ACCESS_DENIED:
+                    raise ScanError(f"Image runner scan failed: {e}") from e
+                print(
+                    f"warning: can't trace shared-repository images ({e}); they stay "
+                    "shared_asset_repository until the role can read them",
+                    file=sys.stderr,
+                )
+            except BotoCoreError as e:
+                raise ScanError(f"Image runner scan failed: {e}") from e
+        return found
+
+    def _ecs_runners(self, region: str) -> list[ImageRunner]:
+        ecs = self._session.client("ecs", region_name=region)
+        pages = ecs.get_paginator("list_task_definitions").paginate(status="ACTIVE")
+        arns = latest_revisions(arn for page in pages for arn in page["taskDefinitionArns"])
+        return [
+            runner
+            for arn in arns
+            for runner in sight_task_definition_runners(
+                ecs.describe_task_definition(taskDefinition=arn, include=["TAGS"]), region
+            )
         ]
 
 

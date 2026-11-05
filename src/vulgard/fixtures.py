@@ -7,11 +7,17 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from .aws import sight_amplify_branch, sight_cfn_stack, sight_finding, sight_sst_objects
+from .aws import (
+    sight_amplify_branch,
+    sight_cfn_stack,
+    sight_finding,
+    sight_sst_objects,
+    sight_task_definition_runners,
+)
 from .clients import Clients
 from .config import IssueConfig
 from .estate import Deployment, Found, NativeRef, RunState, Sighting
-from .inspector import Finding
+from .inspector import Finding, ImageRunner
 from .lifecycle import Op, SafeDelete, Verb
 from .policy import now_utc
 from .vercel import sight_vercel_project
@@ -299,13 +305,23 @@ class FixtureScanner:
 
 
 class FixtureInspector:
-    """Replays raw ListFindings shapes from the fixture through the real parser."""
+    """Replays raw ListFindings and DescribeTaskDefinition shapes from the fixture through the
+    real parsers."""
 
     def __init__(self, data: dict[str, Any]):
-        self._raw = ((data.get("aws") or {}).get("inspector") or {}).get("findings", [])
+        aws = data.get("aws") or {}
+        self._raw = (aws.get("inspector") or {}).get("findings", [])
+        self._task_definitions = aws.get("ecs_task_definitions", [])
 
     def findings(self) -> list[Finding]:
         return [finding for raw in self._raw if (finding := sight_finding(raw))]
+
+    def runners(self) -> list[ImageRunner]:
+        return [
+            runner
+            for response in self._task_definitions
+            for runner in sight_task_definition_runners(response, "us-east-1")
+        ]
 
 
 class FakeSlack:

@@ -24,7 +24,13 @@ from .config import Config
 from .estate import Deployment, ScanError, discover
 from .execute import Outcome, execute, result_comment
 from .github import GitHubError
-from .inspector import InspectorReport, attributed_repos, branch_dependencies, build_report
+from .inspector import (
+    InspectorReport,
+    attributed_repos,
+    branch_dependencies,
+    build_report,
+    is_shared_asset_image,
+)
 from .inspector_render import parent_description, render_summary, unattributed_description
 from .inspector_sla import (
     PARENT_CLOSED,
@@ -234,19 +240,22 @@ def inspector_report(
     gh = clients.github
     repos = selected_repos(gh, config)
     deployments = discover(clients.scanners(), build_index(gh, config, repos), config.deployments)
-    findings = clients.inspector().findings()
+    source = clients.inspector()
+    findings = source.findings()
+    runners = source.runners() if any(is_shared_asset_image(f.resource) for f in findings) else []
     scope = set(only) if only else None
     prs: defaultdict[str, list[DependabotPR]] = defaultdict(list)
     for raw in gh.list_dependabot_prs(config.org):
         pr = DependabotPR.from_api(raw)
         prs[pr.repo].append(pr)
-    in_report = attributed_repos(findings, deployments, config.inspector)
+    in_report = attributed_repos(findings, deployments, config.inspector, runners)
     branches = {
         repo: branch_dependencies(sbom)
         for repo in sorted(in_report & scope if scope else in_report)
         if (sbom := gh.get_sbom(config.org, repo)) is not None
     }
-    return repos, build_report(findings, deployments, config.inspector, scope, prs, branches)
+    report = build_report(findings, deployments, config.inspector, scope, prs, branches, runners)
+    return repos, report
 
 
 def _linear_team(config: Config, repo: InspectorRepo) -> str | None:
