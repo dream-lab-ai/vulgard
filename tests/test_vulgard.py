@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -59,10 +60,13 @@ def alert(number: int, repo: str, severity: str, days_ago: int, package: str = "
     }
 
 
-def pr(number: int, repo: str, title: str, days_ago: int, ci: str | None = None) -> dict:
+def pr(
+    number: int, repo: str, title: str, days_ago: int, ci: str | None = None, body: str = ""
+) -> dict:
     return {
         "number": number,
         "title": title,
+        "body": body,
         "html_url": f"https://github.com/acme/{repo}/pull/{number}",
         "repository_url": f"https://api.github.com/repos/acme/{repo}",
         "created_at": iso(days_ago),
@@ -108,6 +112,69 @@ def test_alert_linked_to_dependabot_fix_pr(config):
         NOW,
     )
     assert reports["api"].alerts[0].fix_pr.number == 9
+
+
+GROUPED_BODY = """Bumps the npm_and_yarn group with 2 updates in the / directory:
+
+| Package | From | To |
+| --- | --- | --- |
+| [axios](https://github.com/axios/axios) | `1.5.0` | `1.6.0` |
+| [@babel/traverse](https://github.com/babel/babel) | `7.22.0` | `7.23.2` |
+
+Updates `axios` from 1.5.0 to 1.6.0
+"""
+
+
+def test_alert_linked_to_a_grouped_pr_through_its_package_table(config):
+    reports = evaluate(
+        config,
+        [alert(1, "api", "high", 1, package="@babel/traverse")],
+        [pr(9, "api", "Bump the npm_and_yarn group with 2 updates", 1, body=GROUPED_BODY)],
+        ["api"],
+        NOW,
+    )
+    assert reports["api"].alerts[0].fix_pr.number == 9
+    assert [ref.package for ref in reports["api"].dependabot_prs[0].fixes] == ["@babel/traverse"]
+
+
+def test_a_multi_package_pr_covers_what_it_updates_and_what_it_removes(config):
+    body = "Removes [zod](https://x).\n\nRemoves `zod`\n\nUpdates `next` from 13.4.4 to 13.5.11\n"
+    reports = evaluate(
+        config,
+        [alert(1, "api", "high", 1, package="zod"), alert(2, "api", "high", 1, package="next")],
+        [pr(9, "api", "Bump zod and next in /frontend", 1, body=body)],
+        ["api"],
+        NOW,
+    )
+    assert [a.fix_pr.number for a in reports["api"].alerts] == [9, 9]
+
+
+def test_a_table_inside_release_notes_does_not_add_packages(config):
+    body = (
+        "Bumps [lodash](https://x) from 4.17.20 to 4.17.21.\n"
+        "<details>\n<summary>Release notes</summary>\n"
+        "| [minimist](https://x) | `1.2.5` | `1.2.6` |\n</details>\n"
+    )
+    reports = evaluate(
+        config,
+        [alert(1, "api", "high", 1, package="minimist")],
+        [pr(9, "api", "Bump lodash from 4.17.20 to 4.17.21", 1, body=body)],
+        ["api"],
+        NOW,
+    )
+    assert reports["api"].alerts[0].fix_pr is None
+
+
+def test_a_pr_body_that_only_mentions_a_package_does_not_cover_it(config):
+    body = "Release notes: fixes a bug reported against `lodash`.\n"
+    reports = evaluate(
+        config,
+        [alert(1, "api", "high", 1, package="lodash")],
+        [pr(9, "api", "Bump the npm group with 1 update", 1, body=body)],
+        ["api"],
+        NOW,
+    )
+    assert reports["api"].alerts[0].fix_pr is None
 
 
 def test_codeowners_catch_all_last_rule_wins():
@@ -698,6 +765,49 @@ def test_create_pr_falls_back_to_the_pr_a_retried_post_already_opened():
     gh._http = httpx.Client(base_url="https://api.test", transport=httpx.MockTransport(handler))
     pr = gh.create_pr("acme", "api", "title", "body", "vulgard/rollout", "main")
     assert pr["html_url"].endswith("/pull/7")
+
+
+def test_dependabot_pr_search_splits_by_creation_time_past_the_result_cap():
+    start = datetime(2026, 11, 3, 14, tzinfo=UTC)
+    created = [start + timedelta(seconds=10 * n) for n in range(2500)]
+    searches: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        variables = json.loads(request.content)["variables"]
+        searches.append(variables["q"])
+        low, high = re.search(r"created:(\S+)\.\.(\S+)", variables["q"]).groups()
+        stamps = [f"{when:%Y-%m-%dT%H:%M:%SZ}" for when in created]
+        in_range = [n for n, stamp in enumerate(stamps) if low <= stamp <= high]
+        offset = int(variables["after"] or 0)
+        visible = in_range[:1000]  # GitHub search never returns more than 1,000 results
+        page = visible[offset : offset + 50]
+        nodes = [
+            {
+                "number": n,
+                "title": f"Bump p{n} from 1.0.0 to 1.0.1",
+                "body": "",
+                "url": f"https://github.com/acme/api/pull/{n}",
+                "createdAt": f"{created[n]:%Y-%m-%dT%H:%M:%SZ}",
+                "isDraft": False,
+                "mergeable": "MERGEABLE",
+                "repository": {"name": "api"},
+                "commits": {"nodes": []},
+            }
+            for n in page
+        ]
+        more = offset + 50 < len(visible)
+        search = {
+            "issueCount": len(in_range),
+            "pageInfo": {"hasNextPage": more, "endCursor": str(offset + 50)},
+            "nodes": nodes,
+        }
+        return httpx.Response(200, json={"data": {"search": search}})
+
+    gh = GitHub(token="t")
+    gh._http = httpx.Client(base_url="https://api.test", transport=httpx.MockTransport(handler))
+    prs = gh.list_dependabot_prs("acme")
+    assert sorted(pr["number"] for pr in prs) == list(range(2500))
+    assert all("author:app/dependabot" in query for query in searches)
 
 
 def test_enforce_status_check_targets_enrolled_repos_only():
