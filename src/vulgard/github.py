@@ -11,6 +11,7 @@ import httpx
 
 API_URL = "https://api.github.com"
 
+EMPTY_BODY_RETRIES = 2
 SEARCH_RESULT_CAP = 1000  # GitHub search returns at most this many results for one query
 SEARCH_START = datetime(2008, 1, 1, tzinfo=UTC)  # before any PR on GitHub was created
 
@@ -171,11 +172,19 @@ class GitHub:
             after = result["pageInfo"]["endCursor"]
 
     def _search_page(self, query: str, after: str | None) -> dict[str, Any]:
-        data = self._json(
-            "POST",
-            "/graphql",
-            json={"query": DEPENDABOT_PRS_QUERY, "variables": {"q": query, "after": after}},
-        )
+        """GitHub's GraphQL search sometimes answers 200 with an empty body, so that is retried
+        like a 5xx."""
+        for attempt in range(EMPTY_BODY_RETRIES + 1):
+            data = self._json(
+                "POST",
+                "/graphql",
+                json={"query": DEPENDABOT_PRS_QUERY, "variables": {"q": query, "after": after}},
+            )
+            if data:
+                break
+            time.sleep(2 ** (attempt + 1))
+        else:
+            raise GitHubError(200, "empty response from the search", "/graphql")
         if data.get("errors"):
             messages = "; ".join(e.get("message", "") for e in data["errors"])
             raise GitHubError(200, messages, "/graphql")
@@ -225,6 +234,15 @@ class GitHub:
         )
         issues = [i for i in issues if "pull_request" not in i]
         return next((i for i in issues if i["state"] == "open"), issues[0] if issues else None)
+
+    def repos_with_open_issues(self, org: str, label: str) -> list[str]:
+        """Names of the org's unarchived repos that have an open issue with this label, found
+        with one search instead of a lookup per repo."""
+        found = self._paginate(
+            "/search/issues",
+            {"q": f'org:{org} is:issue is:open archived:false label:"{label}"'},
+        )
+        return sorted({i["repository_url"].rstrip("/").rsplit("/", 1)[-1] for i in found})
 
     def find_workflow_run(
         self, org: str, repo: str, workflow: str, marker: str

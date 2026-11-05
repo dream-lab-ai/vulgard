@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -8,6 +9,7 @@ import yaml
 from vulgard.cli import main
 from vulgard.clients import Clients
 from vulgard.config import parse_config
+from vulgard.estate import ScanError
 from vulgard.fixtures import (
     FakeLinear,
     FakeSlack,
@@ -17,9 +19,10 @@ from vulgard.fixtures import (
     FixtureScanner,
 )
 from vulgard.inspector_sla import TITLE, UNATTRIBUTED_TITLE
-from vulgard.plan import ActionKind
+from vulgard.plan import ActionKind, Topic
 from vulgard.slack import notify_slack
-from vulgard.topics import NagContext, run_inspector
+from vulgard.topics import NagContext, run_inspector, run_vulns
+from vulgard.vulns import INSPECTOR_TRACKS, OUT_OF_SCOPE
 
 EXAMPLES = Path(__file__).parent.parent / "examples"
 NOW = datetime(2026, 11, 2, 12, tzinfo=UTC)
@@ -95,12 +98,14 @@ class Org:
         self.linear = FakeLinear()
         self.slack = FakeSlack()
         self.config = cfg or config()
+        self.inspector_reads = 0
+        self.inspector_down = False
 
     @property
     def findings(self):
         return self.gh.data["aws"]["inspector"]["findings"]
 
-    def run(self, days=0, apply=True, linear=True, only=None):
+    def context(self, days=0, apply=True, linear=True, only=None, topics=()):
         gh = self.gh
         clients = Clients(
             github=gh,
@@ -110,12 +115,20 @@ class Org:
             kev=frozenset,
             scanners=lambda: [FixtureScanner(gh.data)],
             executor=lambda: FixtureExecutor(gh.data),
-            inspector=lambda: FixtureInspector(gh.data),
+            inspector=self.read_inspector,
         )
         now = NOW + timedelta(days=days)
         client = self.linear if linear else None
-        ctx = NagContext(clients, self.config, only, apply, False, False, now, client)
-        return run_inspector(ctx)
+        return NagContext(clients, self.config, only, apply, False, False, now, client, topics)
+
+    def read_inspector(self):
+        self.inspector_reads += 1
+        if self.inspector_down:
+            raise ScanError("Inspector is down")
+        return FixtureInspector(self.gh.data)
+
+    def run(self, days=0, apply=True, linear=True, only=None):
+        return run_inspector(self.context(days, apply, linear, only))
 
     def github_issue(self, repo):
         return self.gh.data.get("issues", {}).get(f"{repo}#{LABEL}")
@@ -160,6 +173,200 @@ def test_a_repo_of_unknown_visibility_is_treated_as_public():
     world = Org(data)
     world.run()
     assert world.github_issue("api") is None and world.sub_issue("api") is not None
+
+
+def test_findings_attributed_to_an_excluded_repo_are_dropped():
+    data = org(
+        finding("api"),
+        finding("legacy-app"),
+        repos=(("api", "private"), ("legacy-app", "private")),
+    )
+    world = Org(data, replace(config(), exclude=["legacy-*"]))
+    result = world.run()
+    assert world.github_issue("api") is not None and world.sub_issue("api") is not None
+    assert world.github_issue("legacy-app") is None and world.sub_issue("legacy-app") is None
+    assert {run.repo for run in result.runs} == {"api"}
+    assert result.repos == {"api"}
+
+
+# --- which repos the vulns topic leaves to Inspector
+
+BOTH = (Topic.VULNS, Topic.INSPECTOR)
+SCOPE_REPOS = (
+    ("docs-site", "private"),
+    ("svc-in", "private"),
+    ("svc-out", "private"),
+    ("legacy-app", "private"),
+)
+
+
+def alert(number, repo):
+    return {
+        "number": number,
+        "repository": {"name": repo},
+        "created_at": "2026-10-20T00:00:00+00:00",
+        "html_url": f"https://github.com/acme/{repo}/security/dependabot/{number}",
+        "dependency": {"package": {"ecosystem": "npm", "name": "lodash"}, "manifest_path": "p"},
+        "security_advisory": {"ghsa_id": f"GHSA-{number}", "summary": "bad", "severity": "high"},
+        "security_vulnerability": {
+            "package": {"ecosystem": "npm", "name": "lodash"},
+            "first_patched_version": {"identifier": "9.9.9"},
+        },
+    }
+
+
+def scoped_org(*findings, **overrides):
+    """docs-site: in include, no findings. svc-in: in include, has findings. svc-out: outside
+    include, has findings. legacy-app: excluded, has findings. Each has an open alert."""
+    data = org(*findings, repos=SCOPE_REPOS)
+    data["alerts"] = [alert(n, name) for n, (name, _) in enumerate(SCOPE_REPOS, 1)]
+    scope = {"include": ["docs-*", "svc-in", "legacy-*"], "exclude": ["legacy-*"], **overrides}
+    return Org(data, replace(config(), **scope))
+
+
+def scope_findings():
+    return [finding("svc-in"), finding("svc-out"), finding("legacy-app")]
+
+
+def tracked_issues(world):
+    return sorted(world.gh.data.get("issues", {}))
+
+
+def test_each_repo_is_tracked_by_one_topic_by_include_exclude_and_findings():
+    world = scoped_org(*scope_findings())
+    ctx = world.context(topics=BOTH)
+    run_vulns(ctx)
+    run_inspector(ctx)
+    assert tracked_issues(world) == [
+        "docs-site",  # in include, no findings: vulns
+        f"svc-in#{LABEL}",  # in include, has findings: Inspector only
+        f"svc-out#{LABEL}",  # outside include, has findings: Inspector only
+    ]
+
+
+def test_the_vulns_topic_keeps_every_include_repo_when_inspector_is_not_in_the_run():
+    world = scoped_org(*scope_findings())
+    run_vulns(world.context(topics=(Topic.VULNS,)))
+    assert tracked_issues(world) == ["docs-site", "svc-in"]
+    assert world.inspector_reads == 0
+
+
+def test_the_inspector_report_is_built_once_for_a_run():
+    world = scoped_org(*scope_findings())
+    ctx = world.context(topics=BOTH)
+    run_vulns(ctx)
+    run_inspector(ctx)
+    assert world.inspector_reads == 1
+
+
+def test_inspector_report_only_leaves_the_repos_to_the_vulns_topic():
+    world = scoped_org(*scope_findings(), inspector=replace(config().inspector, report_only=True))
+    ctx = world.context(topics=BOTH)
+    run_vulns(ctx)
+    run_inspector(ctx)
+    assert tracked_issues(world) == ["docs-site", "svc-in"]
+
+
+def test_repo_narrows_the_vulns_topic_and_inspector_together():
+    world = scoped_org(*scope_findings())
+    ctx = world.context(topics=BOTH, only=["svc-in", "docs-site"])
+    run_vulns(ctx)
+    run_inspector(ctx)
+    assert tracked_issues(world) == ["docs-site", f"svc-in#{LABEL}"]
+
+
+def test_the_vulns_topic_is_skipped_when_inspector_cannot_say_which_repos_it_tracks(capsys):
+    world = scoped_org(*scope_findings())
+    world.inspector_down = True
+    ctx = world.context(topics=BOTH)
+    vulns, inspector = run_vulns(ctx), run_inspector(ctx)
+    assert vulns.failed and inspector.failed
+    assert tracked_issues(world) == [] and world.inspector_reads == 1
+    assert "skipped vulnerable dependencies" in capsys.readouterr().err
+
+
+# --- closing the vulns issues of repos that moved
+
+
+def vulns_before_the_move():
+    """The vulns topic alone has opened docs-site and svc-in, with a Linear issue each."""
+    world = scoped_org(*scope_findings())
+    run_vulns(world.context(topics=(Topic.VULNS,)))
+    assert world.gh.data["issues"]["svc-in"]["state"] == "open"
+    return world
+
+
+def issue_comments(world, repo):
+    return [args[2] for op, args in world.gh.writes if op == "comment_issue" and args[0] == repo]
+
+
+def linear_comments(world, title):
+    issue_id = world.linear_issue(title)["id"]
+    return [
+        body for op, (target, body) in world.linear.writes if op == "comment" and target == issue_id
+    ]
+
+
+def test_a_repo_inspector_now_tracks_has_its_open_vulns_issue_closed():
+    world = vulns_before_the_move()
+    result = run_vulns(world.context(topics=BOTH))
+    issue = world.gh.data["issues"]["svc-in"]
+    assert issue["state"] == "closed" and issue_comments(world, "svc-in") == [INSPECTOR_TRACKS]
+    title = f"svc-in: {config().issue.title}"
+    assert world.linear_issue(title)["state"]["type"] == "completed"
+    assert linear_comments(world, title) == [INSPECTOR_TRACKS]
+    assert world.gh.data["issues"]["docs-site"]["state"] == "open"
+    assert [(r.repo, a.kind) for r in result.runs for a in r.actions if a.kind == "close"] == [
+        ("svc-in", ActionKind.CLOSE)
+    ]
+
+
+def test_a_repo_that_left_include_has_its_open_vulns_issue_closed():
+    world = vulns_before_the_move()
+    world.config = replace(world.config, include=["svc-in"])
+    run_vulns(world.context(topics=BOTH))
+    assert world.gh.data["issues"]["docs-site"]["state"] == "closed"
+    assert issue_comments(world, "docs-site") == [OUT_OF_SCOPE]
+    assert linear_comments(world, f"docs-site: {config().issue.title}") == [OUT_OF_SCOPE]
+    assert issue_comments(world, "svc-in") == [INSPECTOR_TRACKS]
+
+
+def test_a_dry_run_only_reports_the_issues_it_would_close():
+    world = vulns_before_the_move()
+    writes, linear_writes = len(world.gh.writes), len(world.linear.writes)
+    result = run_vulns(world.context(topics=BOTH, apply=False))
+    kinds_for_svc_in = {a.kind for r in result.runs for a in r.actions if a.repo == "svc-in"}
+    assert kinds_for_svc_in == {ActionKind.CLOSE, ActionKind.LINEAR_CLOSE}
+    assert world.gh.data["issues"]["svc-in"]["state"] == "open"
+    assert (len(world.gh.writes), len(world.linear.writes)) == (writes, linear_writes)
+
+
+def test_nothing_closes_unless_inspector_runs_and_writes_tickets():
+    world = vulns_before_the_move()
+    world.config = replace(world.config, include=["svc-in"])
+    run_vulns(world.context(topics=(Topic.VULNS,)))
+    reporting = replace(world.config.inspector, report_only=True)
+    world.config = replace(world.config, inspector=reporting)
+    run_vulns(world.context(topics=BOTH))
+    assert {i["state"] for i in world.gh.data["issues"].values()} == {"open"}
+
+
+def test_excluded_repos_keep_their_open_vulns_issue():
+    world = vulns_before_the_move()
+    world.gh.data["issues"]["legacy-app"] = {"number": 9, "state": "open", "body": "old"}
+    run_vulns(world.context(topics=BOTH))
+    assert world.gh.data["issues"]["legacy-app"] == {"number": 9, "state": "open", "body": "old"}
+
+
+def test_the_fixture_run_closes_the_demo_issue_inspector_took_over(capsys):
+    assert main([*FIXTURE_ARGS, "nag", "--topic", "vulns", "--topic", "inspector"]) == 0
+    out = capsys.readouterr().out
+    assert "inventory-service: close (tracked by Inspector)" in out
+    assert "web-storefront: create (1 alert(s))" in out
+    assert "payments-api: create (3 alert(s))" not in out
+    assert main([*FIXTURE_ARGS, "nag", "--topic", "vulns", "--topic", "inspector", "--redact"]) == 0
+    out = capsys.readouterr().out
+    assert "close: 1" in out and "inventory-service" not in out
 
 
 def test_two_repos_routed_to_one_team_share_one_parent():

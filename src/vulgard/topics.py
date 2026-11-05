@@ -56,11 +56,11 @@ from .plan import (
 )
 from .policy import DependabotPR, RepoReport, summarize_closed
 from .render import render_org_summary
-from .repos import build_index, is_public, resolve_owners, selected_repos
+from .repos import all_repos, build_index, dependabot_repos, is_public, resolve_owners
 from .slack import Block
 from .stale import StaleMemory, StaleReport, evaluate, spec, survey
 from .stale_plan import plan_repo
-from .vulns import collect, critical_repos, leaderboard_blocks, nag
+from .vulns import collect, critical_repos, hand_over, leaderboard_blocks, nag
 
 SCAN_ERRORS = (ScanError, GitHubError, httpx.HTTPError)
 
@@ -85,12 +85,34 @@ class NagContext:
     leaderboard: bool  # build leaderboard blocks, which costs extra lookups
     now: datetime
     linear: LinearClient | None
+    topics: tuple[Topic, ...] = ()  # the topics this run covers
+
+    @property
+    def inspector_tracks_repos(self) -> bool:
+        """Whether this run's Inspector topic writes tickets for the repos it lists, which the
+        vulns topic then leaves to it."""
+        return Topic.INSPECTOR in self.topics and not self.config.inspector.report_only
+
+    @cached_property
+    def inspector(self) -> tuple[list[dict[str, Any]], InspectorReport] | Exception:
+        """Inspector's report, built once however many topics need it because it takes minutes,
+        or the error that stopped it."""
+        try:
+            return inspector_report(self.clients, self.config, self.only)
+        except SCAN_ERRORS as e:
+            return e
+
+    @cached_property
+    def repos(self) -> list[dict[str, Any]]:
+        """Every repo vulgard works on, listed once however many topics need them."""
+        return all_repos(self.clients.github, self.config, self.only)
 
     @cached_property
     def reports(self) -> dict[str, RepoReport]:
-        """Open alerts per repo, collected once however many topics need them."""
+        """Open alerts in every repo, collected once however many topics need them. Stale
+        deployments read them for every repo, the vulns topic for its own."""
         kev = load_kev(self.clients, self.config)
-        return collect(self.clients.github, self.config, self.only, kev)
+        return collect(self.clients.github, self.config, self.repos, kev)
 
 
 @dataclass
@@ -105,8 +127,23 @@ class TopicResult:
 
 def run_vulns(ctx: NagContext) -> TopicResult:
     gh, config = ctx.clients.github, ctx.config
-    reports = ctx.reports
+    tracked_by_inspector: frozenset[str] = frozenset()
+    if ctx.inspector_tracks_repos:
+        found = ctx.inspector
+        if isinstance(found, Exception):
+            print(
+                f"error: skipped vulnerable dependencies, which need Inspector's repos: {found}",
+                file=sys.stderr,
+            )
+            return TopicResult(failed=True)
+        tracked_by_inspector = frozenset(repo for repo, items in found[1].by_repo.items() if items)
+    repos = dependabot_repos(config, ctx.repos, tracked_by_inspector)
+    reports = {r["name"]: ctx.reports[r["name"]] for r in repos}
     runs = nag(gh, config, reports, apply=ctx.apply, now=ctx.now, linear=ctx.linear)
+    if ctx.inspector_tracks_repos:
+        runs += hand_over(
+            gh, config, ctx.repos, set(reports), tracked_by_inspector, ctx.apply, ctx.linear
+        )
     since = ctx.now - timedelta(days=7)
     closed = summarize_closed(gh.list_closed_alerts(config.org, since), set(reports), since)
     blocks: list[Block] = []
@@ -128,7 +165,7 @@ def _stale_pass(ctx: NagContext) -> tuple[dict[str, StaleReport], list[RepoRun]]
     `deployments.report_only` nothing is written and no runs are returned."""
     gh, config = ctx.clients.github, ctx.config
     cfg, topic = config.deployments, spec(config)
-    repos = selected_repos(gh, config, ctx.only)
+    repos = ctx.repos
     tracked = {r["name"] for r in repos}
     found = survey(gh, config, repos, ctx.clients.scanners(), scoped=bool(ctx.only))
     home = {cfg.unattributed_repo} if cfg.unattributed_repo else set()
@@ -235,10 +272,11 @@ def run_stale(ctx: NagContext) -> TopicResult:
 def inspector_report(
     clients: Clients, config: Config, only: list[str] | None
 ) -> tuple[list[dict[str, Any]], InspectorReport]:
-    """Inspector's findings as fix items, for `report` and `nag`, with the selected repos.
-    `only` (from --repo) keeps just those repos and drops the unattributed buckets."""
+    """Inspector's findings as fix items, for `report` and `nag`, with every repo. Findings
+    attributed to an excluded repo are dropped. `only` (from --repo) keeps just those repos and
+    drops the unattributed buckets."""
     gh = clients.github
-    repos = selected_repos(gh, config)
+    repos = all_repos(gh, config)
     deployments = discover(clients.scanners(), build_index(gh, config, repos), config.deployments)
     source = clients.inspector()
     findings = source.findings()
@@ -248,13 +286,15 @@ def inspector_report(
     for raw in gh.list_dependabot_prs(config.org):
         pr = DependabotPR.from_api(raw)
         prs[pr.repo].append(pr)
-    in_report = attributed_repos(findings, deployments, config.inspector, runners)
+    in_report = attributed_repos(findings, deployments, config.inspector, runners, config.excludes)
     branches = {
         repo: branch_dependencies(sbom)
         for repo in sorted(in_report & scope if scope else in_report)
         if (sbom := gh.get_sbom(config.org, repo)) is not None
     }
-    report = build_report(findings, deployments, config.inspector, scope, prs, branches, runners)
+    report = build_report(
+        findings, deployments, config.inspector, scope, prs, branches, runners, config.excludes
+    )
     return repos, report
 
 
@@ -356,13 +396,16 @@ def _linear_issue(
 def _inspector_pass(
     ctx: NagContext,
 ) -> tuple[list[InspectorRepo], InspectorReport, list[RepoRun], list[Action]]:
-    """A GitHub issue per selected private repo with items, a Linear sub-issue per repo under
-    a parent issue per team, and one Linear issue for findings with no repo. Public repos, and
-    repos vulgard doesn't select, are tracked in Linear only, so only with --linear. With
-    `inspector.report_only` nothing is written and no runs are returned."""
+    """A GitHub issue per private repo with items, a Linear sub-issue per repo under a parent
+    issue per team, and one Linear issue for findings with no repo. Public repos, and repos
+    vulgard doesn't list (archived or not in the org), are tracked in Linear only, so only with
+    --linear. With `inspector.report_only` nothing is written and no runs are returned."""
     gh, config, linear = ctx.clients.github, ctx.config, ctx.linear
-    selected, report = inspector_report(ctx.clients, config, ctx.only)
-    private = {r["name"] for r in selected if not is_public(r)}
+    found = ctx.inspector
+    if isinstance(found, Exception):
+        raise found
+    repos, report = found
+    private = {r["name"] for r in repos if not is_public(r)}
     if ctx.only:
         private &= set(ctx.only)
     issues = load_issues(gh, config, SPEC, sorted(private))
@@ -409,12 +452,15 @@ def _inspector_pass(
             continue
         else:
             try:
-                found = _linear_issue(linear, config, repo, parents)
+                existing = _linear_issue(linear, config, repo, parents)
             except (LinearError, httpx.HTTPError) as e:
                 actions.append(Action(repo.repo, ActionKind.LINEAR_ERROR, str(e)))
                 continue
-            state = TrackingState(InspectorMemory(), linear=_linear_ref(found) if found else None)
-            open_issue = None if found is None else found["state"]["type"] not in CLOSED_STATES
+            linear_ref = _linear_ref(existing) if existing else None
+            state = TrackingState(InspectorMemory(), linear=linear_ref)
+            open_issue = (
+                None if existing is None else existing["state"]["type"] not in CLOSED_STATES
+            )
         plans.append(inspector_plan.plan_repo(repo, config, state, open_issue, ctx.now, parent))
     runs = track(gh, linear, config, plans, issues, ctx.apply)
     if linear is not None and not ctx.only:

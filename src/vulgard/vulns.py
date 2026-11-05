@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 from collections import Counter
-from dataclasses import asdict, dataclass
+from collections.abc import Collection
+from dataclasses import asdict, dataclass, replace
 from datetime import datetime
 from typing import Any, Self
 
@@ -43,7 +44,7 @@ from .render import (
     render_issue_body,
     severity_summary,
 )
-from .repos import resolve_owners, selected_repos
+from .repos import resolve_owners
 from .slack import (
     DIVIDER,
     LEADERBOARD_ROWS,
@@ -56,6 +57,10 @@ from .slack import (
 )
 
 RESOLVED = "✅ All Dependabot alerts are resolved. Thanks! Closing this issue."
+INSPECTOR_TRACKS = "Inspector now tracks this repo's vulnerabilities. Closing this issue."
+OUT_OF_SCOPE = (
+    "This repo is no longer in vulgard's Dependabot scope (`include`). Closing this issue."
+)
 
 
 @dataclass(frozen=True)
@@ -94,18 +99,14 @@ def spec(config: Config) -> TopicSpec:
 
 
 def collect(
-    gh: Any,
-    config: Config,
-    only: list[str] | None = None,
-    kev: frozenset[str] = frozenset(),
+    gh: Any, config: Config, repos: list[dict[str, Any]], kev: frozenset[str] = frozenset()
 ) -> dict[str, RepoReport]:
-    """Open alerts and Dependabot PRs for every selected repo, with owners where there is work."""
-    repos = [r["name"] for r in selected_repos(gh, config, only)]
+    """Open alerts and Dependabot PRs for each of the repos, with owners where there is work."""
     reports = evaluate(
         config,
         gh.list_open_alerts(config.org),
         gh.list_dependabot_prs(config.org),
-        repos,
+        [r["name"] for r in repos],
         kev=kev,
     )
     for report in reports.values():
@@ -302,6 +303,44 @@ def nag(
     now = now or now_utc()
     issues = load_issues(gh, config, spec(config), sorted(reports))
     plans = [plan_repo(reports[repo], config, issues[repo], now) for repo in sorted(reports)]
+    return track(gh, linear, config, plans, issues, apply)
+
+
+def plan_handoff(
+    repo: str, config: Config, issue: TrackedIssue, reason: str, summary: str
+) -> RepoPlan[VulnMemory]:
+    """Close the issue of a repo the topic no longer covers, saying why on GitHub and Linear."""
+    topic = replace(spec(config), linear_closed=reason)
+    state = TrackingState.from_body(issue.body, VulnMemory)
+    return RepoPlan(topic, repo, [], IssueOp.CLOSE, state, summary, lambda _: issue.body, [reason])
+
+
+def hand_over(
+    gh: Any,
+    config: Config,
+    repos: list[dict[str, Any]],
+    covered: Collection[str],
+    tracked_by_inspector: Collection[str],
+    apply: bool,
+    linear: LinearClient | None = None,
+) -> list[RepoRun]:
+    """Close the open issues of repos that moved out of the topic's scope: one issue search for
+    the topic's label, then a lookup for each repo that has one. Excluded and archived repos
+    aren't in `repos`, so their issues stay as they are."""
+    everywhere = {r["name"] for r in repos}
+    stray = [
+        name
+        for name in gh.repos_with_open_issues(config.org, config.issue.label)
+        if name in everywhere and name not in covered
+    ]
+    issues = load_issues(gh, config, spec(config), stray)
+    plans = [
+        plan_handoff(repo, config, issue, INSPECTOR_TRACKS, "tracked by Inspector")
+        if repo in tracked_by_inspector
+        else plan_handoff(repo, config, issue, OUT_OF_SCOPE, "outside include")
+        for repo, issue in issues.items()
+        if issue is not None and issue.open
+    ]
     return track(gh, linear, config, plans, issues, apply)
 
 
