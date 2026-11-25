@@ -29,7 +29,7 @@ concurrency:
 
 jobs:
   nag:
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2604
     steps:
       - uses: actions/checkout@v4
 
